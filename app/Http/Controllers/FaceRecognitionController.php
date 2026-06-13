@@ -9,9 +9,17 @@ class FaceRecognitionController extends Controller
 {
     protected $apiBaseUrl = 'http://127.0.0.1:5000';
 
-    public function index()
+    public function index(Request $request)
     {
-        return view('recognition.index');
+        $recogDevice = $request->query('recog');
+        $cctvDevice = $request->query('cctv');
+        
+        // Jika belum pilih kamera, arahkan ke halaman pilih kamera
+        if (!$recogDevice || !$cctvDevice) {
+            return view('recognition.camera-select');
+        }
+        
+        return view('recognition.index', compact('recogDevice', 'cctvDevice'));
     }
 
     public function enroll()

@@ -221,5 +221,5 @@ async def delete_user(name: str):
 
 
 if __name__ == "__main__":
-    print("Starting Smart Lock API server at http://127.0.0.1:5000")
-    uvicorn.run("app:app", host="127.0.0.1", port=5000, log_level="warning")
+    print("Starting Smart Lock API server at http://127.0.0.1:5001")
+    uvicorn.run("app:app", host="127.0.0.1", port=5001, log_level="warning")
