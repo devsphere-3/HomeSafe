@@ -27,3 +27,5 @@ __pycache__/
 backend/mediapipe-env/
 backend/__pycache__/Master/  
 gcm-diagnose.log 
+composer  
+composer-setup.php 
