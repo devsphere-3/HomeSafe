@@ -20,7 +20,6 @@
                 <thead>
                     <tr class="border-b border-gray-700 text-left">
                         <th class="py-3 px-4">Name</th>
-                        <th class="py-3 px-4">Registered At</th>
                         <th class="py-3 px-4 text-right">Actions</th>
                     </tr>
                 </thead>
@@ -33,9 +32,6 @@
                         <td class="py-3 px-4 font-medium">
                             <i class="fas fa-user-circle text-blue-400 mr-2"></i>
                             {{ $userName }}
-                        </td>
-                        <td class="py-3 px-4 text-gray-400 text-sm">
-                            N/A
                         </td>
                         <td class="py-3 px-4 text-right">
                             <form action="{{ route('users.delete', $userName) }}" method="POST" 

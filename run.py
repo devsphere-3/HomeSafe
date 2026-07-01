@@ -13,7 +13,7 @@ print()
 backend_dir = os.path.join(os.path.dirname(__file__), 'backend')
 os.chdir(backend_dir)
 
-print("[1/2] Starting FastAPI backend at http://127.0.0.1:5000 ...")
+print("[1/2] Starting FastAPI backend at http://127.0.0.1:5001 ...")
 backend_proc = subprocess.Popen(
     [sys.executable, 'app.py'],
     stdout=subprocess.PIPE,
@@ -37,7 +37,7 @@ print()
 print("=" * 50)
 print("  SYSTEM IS RUNNING!")
 print("  Frontend: http://127.0.0.1:8000")
-print("  Backend:  http://127.0.0.1:5000")
+print("  Backend:  http://127.0.0.1:5001")
 print("=" * 50)
 print()
 print("Press Ctrl+C to stop both servers.")

@@ -7,46 +7,59 @@ use Illuminate\Support\Facades\Http;
 
 class FaceRecognitionController extends Controller
 {
-    protected $apiBaseUrl = 'http://127.0.0.1:5000';
+    protected string $apiBaseUrl;
 
-    public function index(Request $request)
+    public function __construct()
     {
-        $recogDevice = $request->query('recog');
-        $cctvDevice = $request->query('cctv');
-        
-        // Jika belum pilih kamera, arahkan ke halaman pilih kamera
-        if (!$recogDevice || !$cctvDevice) {
-            return view('recognition.camera-select');
-        }
-        
-        return view('recognition.index', compact('recogDevice', 'cctvDevice'));
+        $this->apiBaseUrl = config('app.backend_url', env('BACKEND_URL', 'http://127.0.0.1:5001'));
     }
 
+    /** GET / — live recognition page */
+    public function index()
+    {
+        return view('recognition.index');
+    }
+
+    /** GET /enroll — face enrollment page */
     public function enroll()
     {
         return view('recognition.enroll');
     }
 
+    /** GET /users — list of enrolled users */
     public function users()
     {
+        $users = [];
         try {
             $response = Http::timeout(5)->get($this->apiBaseUrl . '/api/users');
-            $users = $response->successful() ? $response->json()['users'] : [];
+            if ($response->successful()) {
+                $users = $response->json()['users'] ?? [];
+            }
         } catch (\Exception $e) {
-            $users = [];
+            // backend unreachable — show empty list with a flash message
+            session()->flash('error', 'Backend tidak dapat dijangkau: ' . $e->getMessage());
         }
-        
+
         return view('recognition.users', compact('users'));
     }
 
-    public function deleteUser($name)
+    /** DELETE /users/{name} */
+    public function deleteUser(string $name)
     {
         try {
-            Http::timeout(5)->delete($this->apiBaseUrl . '/api/users/' . $name);
+            Http::timeout(5)->delete($this->apiBaseUrl . '/api/users/' . urlencode($name));
         } catch (\Exception $e) {
-            // Handle error
+            return redirect()->route('users')
+                ->with('error', "Gagal menghapus user '{$name}': " . $e->getMessage());
         }
-        
-        return redirect()->route('users')->with('success', "User '{$name}' deleted successfully.");
+
+        return redirect()->route('users')
+            ->with('success', "User '{$name}' berhasil dihapus.");
+    }
+
+    /** GET /history — access history page */
+    public function history()
+    {
+        return view('recognition.history');
     }
 }

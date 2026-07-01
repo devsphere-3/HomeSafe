@@ -2,228 +2,214 @@
 
 @section('title', 'Smart Lock - Face Recognition')
 
+@php
+    $backendUrl = config('app.backend_url', 'http://127.0.0.1:5001');
+    $wsUrl = str_replace(['https://', 'http://'], ['wss://', 'ws://'], $backendUrl);
+@endphp
+
 @push('styles')
 <style>
-    #video-feed, #cctv-feed {
-        width: 100%;
-        height: 100%;
-        object-fit: cover;
-        border-radius: 0.5rem;
+    .panel { background: #1f2937; border-radius: 0.5rem; padding: 1rem; }
+    .panel-header { display: flex; align-items: center; justify-content: space-between; flex-wrap: wrap; gap: 0.5rem; margin-bottom: 0.75rem; }
+    .panel-title { font-weight: 600; font-size: 0.95rem; display: flex; align-items: center; gap: 0.4rem; }
+    .cam-feed {
+        position: relative; background: #0d1117; border-radius: 0.5rem;
+        overflow: hidden; aspect-ratio: 4/3; min-height: 220px;
     }
-    #overlay-canvas {
-        position: absolute;
-        top: 0;
-        left: 0;
-        width: 100%;
-        height: 100%;
-        pointer-events: none;
+    .cam-feed canvas { position: absolute; inset: 0; width: 100%; height: 100%; }
+    .badge-alert { position: absolute; top: 8px; right: 8px; z-index: 10; }
+    .lock-bar { position: absolute; bottom: 12px; left: 50%; transform: translateX(-50%); z-index: 10; }
+    #motion-flash {
+        position: absolute; inset: 0; pointer-events: none; z-index: 15;
+        border: 4px solid transparent; transition: border-color 0.1s;
     }
-    .camera-container {
-        position: relative;
-        background: #000;
-        border-radius: 0.5rem;
-        overflow: hidden;
-        aspect-ratio: 4/3;
+    #motion-flash.active { border-color: #ef4444; box-shadow: inset 0 0 40px rgba(239,68,68,0.4); }
+    #unlock-overlay, #camera-off-overlay {
+        position: absolute; inset: 0; display: flex; flex-direction: column;
+        align-items: center; justify-content: center; z-index: 20;
+        pointer-events: none; opacity: 0; transition: opacity 0.4s;
+        background: rgba(0,0,0,0.55); backdrop-filter: blur(4px);
     }
-    .status-badge {
-        position: absolute;
-        top: 10px;
-        left: 10px;
-        z-index: 10;
+    #unlock-overlay.show, #camera-off-overlay.show { opacity: 1; pointer-events: auto; }
+    .check-icon { font-size: 4rem; color: #22c55e; }
+    .stats-row { display: flex; flex-wrap: wrap; gap: 0.5rem; margin-top: 0.75rem; font-size: 0.75rem; color: #9ca3af; }
+    .stat-chip { background: rgba(255,255,255,0.05); padding: 0.25rem 0.6rem; border-radius: 0.375rem; }
+    .stat-chip .val { font-weight: 600; color: #e5e7eb; }
+    .fps-high { color: #22c55e; } .fps-mid { color: #f59e0b; } .fps-low { color: #ef4444; }
+    .btn-sm { padding: 0.4rem 0.75rem; border-radius: 0.375rem; font-size: 0.8rem; cursor: pointer; border: none; transition: background .15s; }
+    .btn-blue  { background: #2563eb; color: #fff; } .btn-blue:hover  { background: #1d4ed8; }
+    .btn-green { background: #16a34a; color: #fff; } .btn-green:hover { background: #15803d; }
+    .btn-red   { background: #dc2626; color: #fff; } .btn-red:hover   { background: #b91c1c; }
+    .btn-gray  { background: #374151; color: #fff; } .btn-gray:hover  { background: #4b5563; }
+    .log-panel { background: #111827; border-radius: 0.5rem; padding: 0.75rem; max-height: 280px; overflow-y: auto; }
+    .log-panel h3 { font-size: 0.85rem; font-weight: 600; margin-bottom: 0.5rem; color: #d1d5db; }
+    .history-card, .motion-card {
+        display: flex; align-items: center; gap: 0.75rem;
+        padding: 0.5rem 0.75rem; background: #1f2937; border-radius: 0.375rem;
+        margin-bottom: 0.4rem; border-left: 3px solid #374151;
     }
-    .anomaly-badge {
-        position: absolute;
-        top: 10px;
-        right: 10px;
-        z-index: 10;
+    .history-card img { width: 48px; height: 36px; object-fit: cover; border-radius: 0.25rem; }
+    .motion-card.alert { border-left-color: #ef4444; background: rgba(127,29,29,0.2); }
+    .conn-bar { display: flex; align-items: center; gap: 1rem; font-size: 0.75rem; margin-bottom: 1rem; color: #9ca3af; }
+    .grid-main { display: grid; grid-template-columns: 1fr 320px; gap: 1rem; }
+    @media (max-width: 1024px) { .grid-main { grid-template-columns: 1fr; } }
+    /* cam-select */
+    .cam-select {
+        background: #374151; border: 1px solid #4b5563; color: #fff;
+        padding: 0.3rem 0.6rem; border-radius: 0.375rem; font-size: 0.75rem;
+        min-width: 200px; max-width: 320px;
     }
-    .lock-indicator {
-        position: absolute;
-        bottom: 10px;
-        left: 10px;
-        right: 10px;
-        z-index: 10;
-        text-align: center;
-    }
-    #unlock-overlay {
-        position: absolute;
-        top: 0;
-        left: 0;
-        width: 100%;
-        height: 100%;
-        display: flex;
-        flex-direction: column;
-        align-items: center;
-        justify-content: center;
-        z-index: 20;
-        pointer-events: none;
-        opacity: 0;
-        transition: opacity 0.3s ease;
-        border-radius: 0.5rem;
-    }
-    #unlock-overlay.show {
-        opacity: 1;
-    }
-    #unlock-overlay .check-icon {
-        font-size: 80px;
-        color: #22c55e;
-        text-shadow: 0 0 30px rgba(34, 197, 94, 0.7);
-    }
-    #unlock-overlay .unlock-text {
-        font-size: 24px;
-        font-weight: bold;
-        color: #22c55e;
-        margin-top: 10px;
-        text-shadow: 0 0 20px rgba(34, 197, 94, 0.5);
-    }
-    #unlock-overlay .unlock-name {
-        font-size: 18px;
-        color: #86efac;
-        margin-top: 5px;
-    }
-    #fps-counter {
-        font-weight: 600;
-        transition: color 0.3s;
-    }
-    #fps-counter.fps-low { color: #ef4444; }
-    #fps-counter.fps-mid { color: #f59e0b; }
-    #fps-counter.fps-high { color: #22c55e; }
-    .info-bar {
-        display: flex;
-        align-items: center;
-        flex-wrap: wrap;
-        gap: 16px;
-    }
-    .info-bar span {
-        display: inline-flex;
-        align-items: center;
-        gap: 4px;
-    }
-    #cctv-overlay {
-        position: absolute;
-        top: 0;
-        left: 0;
-        width: 100%;
-        height: 100%;
-        pointer-events: none;
-    }
-    .anomaly-indicator {
-        position: absolute;
-        top: 40px;
-        right: 10px;
-        z-index: 10;
-        transition: all 0.3s;
-    }
-    .anomaly-log {
-        max-height: 80px;
-        overflow-y: auto;
-        font-size: 11px;
-        font-family: monospace;
-        background: rgba(0,0,0,0.3);
-        border-radius: 4px;
-        padding: 4px 8px;
-        margin-top: 4px;
-    }
-    .anomaly-log div {
-        white-space: nowrap;
-        overflow: hidden;
-        text-overflow: ellipsis;
-    }
-    .anomaly-log .anomaly-warn { color: #f59e0b; }
-    .anomaly-log .anomaly-danger { color: #ef4444; }
-    .anomaly-log .anomaly-info { color: #3b82f6; }
-    .motion-bar {
-        height: 4px;
-        border-radius: 2px;
-        background: #374151;
-        margin-top: 4px;
-        overflow: hidden;
-    }
-    .motion-bar-fill {
-        height: 100%;
-        border-radius: 2px;
-        transition: width 0.3s, background 0.3s;
-        width: 0%;
-    }
-    .motion-bar-fill.low { background: #22c55e; }
-    .motion-bar-fill.medium { background: #f59e0b; }
-    .motion-bar-fill.high { background: #ef4444; }
+    .cam-select:disabled { opacity: .5; cursor: not-allowed; }
+    option:disabled { color: #6b7280; }
 </style>
 @endpush
 
 @section('content')
-<div class="grid grid-cols-1 lg:grid-cols-2 gap-6">
-    {{-- Kamera 1: Face Recognition / Pintu --}}
-    <div class="bg-gray-800 rounded-lg p-4">
-        <h2 class="text-lg font-semibold mb-3 flex items-center">
-            <i class="fas fa-door-open text-blue-400 mr-2"></i>
-            Pintu Utama - Face Recognition
-        </h2>
-        <div class="camera-container">
-            <video id="video-feed" autoplay muted playsinline></video>
-            <canvas id="overlay-canvas"></canvas>
-            <div class="status-badge">
-                <span id="recognition-status" class="px-2 py-1 text-xs rounded bg-yellow-600">
-                    <i class="fas fa-circle-notch fa-spin mr-1"></i>Waiting...
+
+{{-- Connection status bar --}}
+<div class="conn-bar">
+    <span>
+        <i id="conn-dot" class="fas fa-circle text-[8px] text-red-400"></i>
+        <span id="conn-text" class="text-xs text-red-400 ml-1">Offline</span> — Kamera Pintu
+    </span>
+    <span>
+        <i id="yard-conn-dot" class="fas fa-circle text-[8px] text-red-400"></i>
+        <span id="yard-conn-text" class="text-xs text-red-400 ml-1">Offline</span> — CCTV
+    </span>
+    <span class="text-xs text-gray-500 ml-auto">Backend: {{ $backendUrl }}</span>
+</div>
+
+{{-- Camera selector panel --}}
+<div class="panel mb-4">
+    <div class="flex flex-wrap items-center gap-3 mb-2">
+        {{-- Door --}}
+        <div class="flex items-center gap-2">
+            <i class="fas fa-door-open text-blue-400 text-sm"></i>
+            <label class="text-xs text-gray-300 whitespace-nowrap">Pintu (Face Recognition):</label>
+            <select id="door-cam-select" class="cam-select" disabled>
+                <option value="">Memuat…</option>
+            </select>
+            <button id="btn-apply-door" class="btn-sm btn-blue">
+                <i class="fas fa-check mr-1"></i>Terapkan
+            </button>
+        </div>
+        <span class="text-gray-600 hidden sm:inline">|</span>
+        {{-- Yard --}}
+        <div class="flex items-center gap-2">
+            <i class="fas fa-video text-green-400 text-sm"></i>
+            <label class="text-xs text-gray-300 whitespace-nowrap">CCTV (Motion):</label>
+            <select id="yard-cam-select" class="cam-select" disabled>
+                <option value="">Memuat…</option>
+            </select>
+            <button id="btn-apply-yard" class="btn-sm btn-blue">
+                <i class="fas fa-check mr-1"></i>Terapkan
+            </button>
+        </div>
+        <button id="btn-refresh-cameras" class="btn-sm btn-gray ml-auto">
+            <i class="fas fa-sync-alt mr-1"></i>Refresh
+        </button>
+    </div>
+    <p id="cam-selector-note" class="text-xs text-gray-500">
+        <i class="fas fa-spinner fa-spin mr-1"></i>Mendeteksi kamera…
+    </p>
+</div>
+
+<div class="grid-main">
+    {{-- Left: dual camera feeds --}}
+    <div class="space-y-4">
+
+        {{-- DOOR — face recognition --}}
+        <div class="panel">
+            <div class="panel-header">
+                <span class="panel-title">
+                    <i class="fas fa-door-open text-blue-400"></i>Kamera Pintu — Face Recognition
+                </span>
+                <span id="recognition-status" class="px-2 py-1 text-xs rounded bg-yellow-700 flex items-center gap-1">
+                    <i class="fas fa-circle-notch fa-spin"></i>Menghubungkan…
                 </span>
             </div>
-            <div id="unlock-overlay">
-                <div class="check-icon"><i class="fas fa-check-circle"></i></div>
-                <div class="unlock-text">ACCESS GRANTED</div>
-                <div class="unlock-name" id="unlock-name-display"></div>
-            </div>
-            <div class="lock-indicator">
-                <div id="lock-status" class="inline-flex items-center px-4 py-2 rounded-lg bg-gray-900/80 backdrop-blur-sm">
-                    <i id="lock-icon" class="fas fa-lock text-2xl text-red-400 mr-2"></i>
-                    <span id="lock-text" class="font-semibold">LOCKED</span>
-                    <span id="user-info" class="ml-3 text-sm text-gray-300 hidden"></span>
+            <div class="cam-feed">
+                <canvas id="overlay-canvas"></canvas>
+                <div id="unlock-overlay">
+                    <div class="check-icon"><i class="fas fa-check-circle"></i></div>
+                    <div class="text-xl font-bold text-green-400 mt-2">ACCESS GRANTED</div>
+                    <div id="unlock-name-display" class="text-green-300 mt-1"></div>
+                    <div id="unlock-pct-display" class="text-green-400/70 text-sm mt-1"></div>
+                </div>
+                <div id="camera-off-overlay">
+                    <i class="fas fa-camera-slash text-4xl text-gray-400 mb-3"></i>
+                    <p class="text-gray-300 text-sm mb-3">Sesi selesai</p>
+                    <button id="btn-cam-off-restart" class="btn-sm btn-blue pointer-events-auto">Mulai Ulang</button>
+                </div>
+                <div class="lock-bar">
+                    <div id="lock-status" class="inline-flex items-center px-4 py-2 rounded-lg bg-gray-900/80 backdrop-blur-sm gap-2">
+                        <i id="lock-icon" class="fas fa-lock text-xl text-red-400"></i>
+                        <span id="lock-text">LOCKED</span>
+                        <span id="user-info" class="hidden text-xs text-green-300"></span>
+                    </div>
                 </div>
             </div>
+            <div class="stats-row">
+                <span class="stat-chip">Wajah: <span class="val" id="face-count">0</span></span>
+                <span class="stat-chip">Proses: <span class="val" id="process-time">0</span>ms</span>
+                <span class="stat-chip">FPS: <span class="val fps-high" id="fps-counter">0</span></span>
+                <span class="stat-chip hidden" id="user-indicator-wrapper">
+                    <i class="fas fa-user-check text-green-400 mr-1"></i>
+                    <span class="val" id="user-indicator"></span>
+                </span>
+            </div>
+            <button id="btn-restart-scan" class="btn-sm btn-gray mt-2 hidden">
+                <i class="fas fa-redo mr-1"></i>Scan Ulang
+            </button>
         </div>
-        <div class="mt-3 info-bar text-sm text-gray-400">
-            <span><i class="fas fa-users mr-1"></i>Face count: <span id="face-count">0</span></span>
-            <span><i class="fas fa-tachometer-alt mr-1"></i><span id="process-time">0</span>ms</span>
-            <span><i class="fas fa-chart-line mr-1"></i><span id="fps-counter">0</span> FPS</span>
-            <span id="user-indicator-wrapper" style="display:none;">
-                <i class="fas fa-user-check text-green-400 mr-1"></i>
-                <span id="user-indicator" class="text-green-400 font-semibold"></span>
-            </span>
+
+        {{-- YARD — CCTV motion detection --}}
+        <div class="panel">
+            <div class="panel-header">
+                <span class="panel-title">
+                    <i class="fas fa-video text-green-400"></i>CCTV — Deteksi Gerakan
+                </span>
+                <div class="flex items-center gap-2">
+                    <span id="motion-status-chip" class="px-2 py-1 text-xs rounded bg-gray-700 flex items-center gap-1">
+                        <i class="fas fa-circle-notch fa-spin text-gray-400"></i>
+                        <span class="text-gray-400">Menghubungkan…</span>
+                    </span>
+                    <span id="yard-status" class="px-2 py-1 text-xs rounded bg-yellow-700 flex items-center gap-1">
+                        <i class="fas fa-circle-notch fa-spin"></i>Menghubungkan…
+                    </span>
+                </div>
+            </div>
+            <div class="cam-feed">
+                <canvas id="yard-canvas"></canvas>
+                <div id="motion-flash"></div>
+                <span id="motion-alert-badge" class="badge-alert hidden px-2 py-1 text-xs rounded bg-red-600 font-bold animate-pulse">
+                    <i class="fas fa-exclamation-triangle mr-1"></i>ALERT
+                </span>
+            </div>
+            <div class="stats-row">
+                <span class="stat-chip">FPS: <span class="val fps-high" id="yard-fps">0</span></span>
+                <span class="stat-chip">Objek: <span class="val" id="motion-count">0</span></span>
+                <span class="stat-chip">Area gerak: <span class="val" id="motion-ratio">0%</span></span>
+            </div>
         </div>
     </div>
 
-    {{-- Kamera 2: CCTV Monitoring + Anomaly Detection --}}
-    <div class="bg-gray-800 rounded-lg p-4">
-        <h2 class="text-lg font-semibold mb-3 flex items-center">
-            <i class="fas fa-video text-green-400 mr-2"></i>
-            CCTV Monitoring
-            <span class="ml-auto text-xs font-normal text-gray-500" id="anomaly-count-badge">0 anomalies</span>
-        </h2>
-        <div class="camera-container">
-            <video id="cctv-feed" autoplay muted playsinline></video>
-            <canvas id="cctv-overlay" style="position:absolute;top:0;left:0;width:100%;height:100%;pointer-events:none;"></canvas>
-            <div class="status-badge">
-                <span id="cctv-status" class="px-2 py-1 text-xs rounded bg-green-600">
-                    <i class="fas fa-circle mr-1"></i>LIVE
-                </span>
-            </div>
-            <div class="anomaly-indicator">
-                <span id="anomaly-status" class="px-2 py-1 text-xs rounded bg-green-600 hidden">
-                    <i class="fas fa-shield-alt mr-1"></i>Normal
-                </span>
-            </div>
+    {{-- Right: logs --}}
+    <div class="space-y-4">
+        <div class="log-panel">
+            <h3><i class="fas fa-door-open text-green-400 mr-1"></i>Riwayat Akses</h3>
+            <div id="history-list"></div>
+            <p id="history-empty" class="text-xs text-gray-500 text-center py-4">Belum ada akses tercatat</p>
         </div>
-        <div class="mt-2">
-            <div class="flex items-center justify-between text-xs text-gray-400">
-                <span><i class="fas fa-running mr-1"></i>Motion: <span id="motion-level">0</span>%</span>
-                <span><i class="fas fa-sun mr-1"></i>Brightness: <span id="brightness-level">0</span></span>
-                <span><i class="fas fa-clock mr-1"></i><span id="cctv-time">-</span></span>
+        <div class="log-panel">
+            <div class="flex items-center justify-between mb-2">
+                <h3><i class="fas fa-bell text-red-400 mr-1"></i>Log Deteksi Gerakan</h3>
+                <button id="btn-clear-motion" class="text-xs text-gray-400 hover:text-white">
+                    <i class="fas fa-trash mr-1"></i>Hapus
+                </button>
             </div>
-            <div class="motion-bar">
-                <div class="motion-bar-fill low" id="motion-bar-fill" style="width:0%"></div>
-            </div>
-            <div class="anomaly-log" id="anomaly-log">
-                <div class="anomaly-info">System initialized. Monitoring...</div>
-            </div>
+            <div id="motion-log-list"></div>
+            <p id="motion-log-empty" class="text-xs text-gray-500 text-center py-4">Belum ada gerakan terdeteksi</p>
         </div>
     </div>
 </div>
@@ -231,452 +217,469 @@
 
 @push('scripts')
 <script>
-// === WEBSOCKET CONNECTION ===
-const WS_URL = 'ws://127.0.0.1:5001/ws';
-const video     = document.getElementById('video-feed');
-const cctvVideo = document.getElementById('cctv-feed');
-const canvas    = document.getElementById('overlay-canvas');
-const ctx       = canvas.getContext('2d');
-const cctvCanvas = document.getElementById('cctv-overlay');
-const cctvCtx    = cctvCanvas.getContext('2d');
+// ── CONFIG ────────────────────────────────────────────────────────────────────
+const API_URL    = '{{ $backendUrl }}';
+const WS_URL     = '{{ $wsUrl }}/ws';
+const WS_MOT_URL = '{{ $wsUrl }}/ws/motion';
+const MAX_RC     = 15000;
 
-let ws = null;
-let reconnectTimer = null;
-let reconnectAttempts = 0;
-const MAX_RECONNECT_DELAY = 15000;
+// ── DOM — door ────────────────────────────────────────────────────────────────
+const canvas       = document.getElementById('overlay-canvas');
+const ctx          = canvas.getContext('2d', { alpha: false });
+const elStatus     = document.getElementById('recognition-status');
+const elFaceCount  = document.getElementById('face-count');
+const elProcTime   = document.getElementById('process-time');
+const elFpsCtr     = document.getElementById('fps-counter');
+const elIndWrap    = document.getElementById('user-indicator-wrapper');
+const elInd        = document.getElementById('user-indicator');
+const elLockIcon   = document.getElementById('lock-icon');
+const elLockText   = document.getElementById('lock-text');
+const elUserInfo   = document.getElementById('user-info');
+const elLockStatus = document.getElementById('lock-status');
+const elUnlockOvr  = document.getElementById('unlock-overlay');
+const elUnlockName = document.getElementById('unlock-name-display');
+const elUnlockPct  = document.getElementById('unlock-pct-display');
+const elCamOff     = document.getElementById('camera-off-overlay');
+const elBtnRestart = document.getElementById('btn-restart-scan');
+const elBtnCamOff  = document.getElementById('btn-cam-off-restart');
+const elHistList   = document.getElementById('history-list');
+const elHistEmpty  = document.getElementById('history-empty');
+const elConnDot    = document.getElementById('conn-dot');
+const elConnText   = document.getElementById('conn-text');
 
-// === FPS COUNTER ===
-let fpsTimestamps = [];
-let currentFps = 0;
+// ── DOM — yard ────────────────────────────────────────────────────────────────
+const yardCanvas      = document.getElementById('yard-canvas');
+const yardCtx         = yardCanvas.getContext('2d', { alpha: false });
+const elYardStatus    = document.getElementById('yard-status');
+const elMotionBadge   = document.getElementById('motion-alert-badge');
+const elMotionChip    = document.getElementById('motion-status-chip');
+const elMotionFlash   = document.getElementById('motion-flash');
+const elYardFps       = document.getElementById('yard-fps');
+const elMotionCount   = document.getElementById('motion-count');
+const elMotionRatio   = document.getElementById('motion-ratio');
+const elYardConnDot   = document.getElementById('yard-conn-dot');
+const elYardConnText  = document.getElementById('yard-conn-text');
+const elMotionLogList = document.getElementById('motion-log-list');
+const elMotionEmpty   = document.getElementById('motion-log-empty');
 
-function updateFps() {
-    const now = performance.now();
-    fpsTimestamps.push(now);
-    fpsTimestamps = fpsTimestamps.filter(t => now - t < 3000);
-    if (fpsTimestamps.length > 1) {
-        currentFps = Math.round((fpsTimestamps.length - 1) / ((now - fpsTimestamps[0]) / 1000));
-    }
-    const fpsEl = document.getElementById('fps-counter');
-    if (fpsEl) {
-        fpsEl.textContent = currentFps;
-        fpsEl.className = currentFps < 5 ? 'fps-low' : currentFps < 15 ? 'fps-mid' : 'fps-high';
-    }
-}
+// ── DOM — selector ────────────────────────────────────────────────────────────
+const elDoorSel = document.getElementById('door-cam-select');
+const elYardSel = document.getElementById('yard-cam-select');
+const elNote    = document.getElementById('cam-selector-note');
 
-// ========================
-// CCTV ANOMALY DETECTION
-// ========================
-let cctvInitialized = false;
-let prevCctvFrame = null;
-let anomalyCount = 0;
-const ANOMALY_LOG_MAX = 50;
-const MOTION_THRESHOLD = 25;    // persentase perubahan piksel = motion
-const BRIGHTNESS_DROP_THRESHOLD = 15; // brightness turun dibawah ini = kemungkinan tertutup
-const DARK_FRAME_WARN_COUNT = 5; // setelah 5 frame gelap berturut-turut = alert
+// ── STATE ─────────────────────────────────────────────────────────────────────
+let ws = null, wsMotion = null;
+let rcTimer = null, rcMotionTimer = null;
+let rcAttempts = 0, rcMotionAttempts = 0;
+let sessionLocked = false, lastResult = null;
 
-let darkFrameCounter = 0;
-let lastAnomalyTime = 0;
-let anomalyCooldown = 3000; // ms, minimal jeda antar alert
-
-function addAnomalyLog(message, type = 'info') {
-    const log = document.getElementById('anomaly-log');
-    const time = new Date().toLocaleTimeString();
-    const div = document.createElement('div');
-    div.className = `anomaly-${type}`;
-    div.textContent = `[${time}] ${message}`;
-    log.appendChild(div);
-    if (log.children.length > ANOMALY_LOG_MAX) {
-        log.removeChild(log.firstChild);
-    }
-    log.scrollTop = log.scrollHeight;
-}
-
-function triggerAnomaly(message, type = 'warn') {
-    const now = Date.now();
-    if (now - lastAnomalyTime < anomalyCooldown) return;
-    lastAnomalyTime = now;
-    
-    anomalyCount++;
-    document.getElementById('anomaly-count-badge').textContent = `${anomalyCount} anomalies`;
-    
-    // Show anomaly badge
-    const badge = document.getElementById('anomaly-status');
-    badge.className = `px-2 py-1 text-xs rounded ${type === 'danger' ? 'bg-red-600' : 'bg-orange-600'}`;
-    badge.innerHTML = `<i class="fas fa-exclamation-triangle mr-1"></i>${type === 'danger' ? 'ALERT' : 'WARNING'}`;
-    badge.classList.remove('hidden');
-    
-    addAnomalyLog(message, type);
-    
-    // Draw flash on CCTV overlay
-    cctvCtx.fillStyle = type === 'danger' ? 'rgba(239,68,68,0.15)' : 'rgba(245,158,11,0.15)';
-    cctvCtx.fillRect(0, 0, cctvCanvas.width, cctvCanvas.height);
-    
-    // Draw border
-    cctvCtx.strokeStyle = type === 'danger' ? '#ef4444' : '#f59e0b';
-    cctvCtx.lineWidth = 4;
-    cctvCtx.strokeRect(2, 2, cctvCanvas.width - 4, cctvCanvas.height - 4);
-    
-    // Auto-hide badge after 5 seconds
-    setTimeout(() => {
-        badge.classList.add('hidden');
-        cctvCtx.clearRect(0, 0, cctvCanvas.width, cctvCanvas.height);
-    }, 5000);
-}
-
-function analyzeCctvFrame(currentFrame, width, height) {
-    if (!prevCctvFrame) {
-        prevCctvFrame = currentFrame;
-        return;
-    }
-    
-    // Hitung brightness rata-rata
-    let totalBrightness = 0;
-    let changedPixels = 0;
-    const totalPixels = width * height;
-    const sampleStep = 4; // sample every 4th pixel for performance
-    
-    for (let y = 0; y < height; y += sampleStep) {
-        for (let x = 0; x < width; x += sampleStep) {
-            const idx = (y * width + x) * 4;
-            if (idx + 3 >= currentFrame.length) continue;
-            
-            // Brightness current frame
-            const r = currentFrame[idx];
-            const g = currentFrame[idx + 1];
-            const b = currentFrame[idx + 2];
-            const brightness = 0.299 * r + 0.587 * g + 0.114 * b;
-            totalBrightness += brightness;
-            
-            // Motion detection - compare with previous frame
-            if (prevCctvFrame) {
-                const pr = prevCctvFrame[idx];
-                const pg = prevCctvFrame[idx + 1];
-                const pb = prevCctvFrame[idx + 2];
-                const diff = Math.abs(r - pr) + Math.abs(g - pg) + Math.abs(b - pb);
-                if (diff > 60) { // sensitivity threshold
-                    changedPixels++;
-                }
-            }
-        }
-    }
-    
-    const sampledPixels = Math.ceil(totalPixels / (sampleStep * sampleStep));
-    const avgBrightness = totalBrightness / sampledPixels;
-    const motionPercent = Math.min(100, Math.round((changedPixels / sampledPixels) * 100));
-    
-    // Update UI
-    document.getElementById('motion-level').textContent = motionPercent;
-    document.getElementById('brightness-level').textContent = Math.round(avgBrightness);
-    document.getElementById('cctv-time').textContent = new Date().toLocaleTimeString();
-    
-    // Motion bar
-    const bar = document.getElementById('motion-bar-fill');
-    bar.style.width = motionPercent + '%';
-    bar.className = 'motion-bar-fill ' + (motionPercent > 50 ? 'high' : motionPercent > 20 ? 'medium' : 'low');
-    
-    // === ANOMALY CHECKS ===
-    
-    // 1. Dark frame detection (kamera ditutup / diblokir)
-    if (avgBrightness < BRIGHTNESS_DROP_THRESHOLD) {
-        darkFrameCounter++;
-        if (darkFrameCounter >= DARK_FRAME_WARN_COUNT) {
-            triggerAnomaly('⚠️ Camera obstructed! Frame is too dark.', 'danger');
-            darkFrameCounter = 0;
-        }
-    } else {
-        darkFrameCounter = 0;
-    }
-    
-    // 2. High motion detection (gerakan mencurigakan)
-    if (motionPercent > 70) {
-        triggerAnomaly(`🚨 High motion detected! (${motionPercent}%)`, 'danger');
-    } else if (motionPercent > 50) {
-        triggerAnomaly(`⚠️ Significant motion (${motionPercent}%)`, 'warn');
-    }
-    
-    // 3. Extreme brightness change (kemungkinan lampu mati/nyala mendadak)
-    // Disimpan untuk digunakan di frame berikutnya
-    if (prevCctvFrame) {
-        // Hitung brightness change
-        let prevBrightness = 0;
-        let prevSamples = 0;
-        for (let y = 0; y < height; y += sampleStep) {
-            for (let x = 0; x < width; x += sampleStep) {
-                const idx = (y * width + x) * 4;
-                if (idx + 3 >= prevCctvFrame.length) continue;
-                const pr = prevCctvFrame[idx];
-                const pg = prevCctvFrame[idx + 1];
-                const pb = prevCctvFrame[idx + 2];
-                prevBrightness += 0.299 * pr + 0.587 * pg + 0.114 * pb;
-                prevSamples++;
-            }
-        }
-        if (prevSamples > 0) {
-            const avgPrevBrightness = prevBrightness / prevSamples;
-            const brightnessDiff = Math.abs(avgBrightness - avgPrevBrightness);
-            if (brightnessDiff > 80) {
-                triggerAnomaly(`💡 Sudden brightness change! (${Math.round(brightnessDiff)})`, 'warn');
-            }
-        }
-    }
-    
-    // Simpan frame untuk perbandingan berikutnya
-    prevCctvFrame = currentFrame;
-}
-
-function processCctvFrame() {
-    if (!cctvVideo.videoWidth || !cctvVideo.videoHeight) return;
-    
-    const tempCanvas = document.createElement('canvas');
-    tempCanvas.width = cctvVideo.videoWidth;
-    tempCanvas.height = cctvVideo.videoHeight;
-    const tempCtx = tempCanvas.getContext('2d');
-    tempCtx.drawImage(cctvVideo, 0, 0);
-    
-    const imageData = tempCtx.getImageData(0, 0, tempCanvas.width, tempCanvas.height);
-    analyzeCctvFrame(imageData.data, tempCanvas.width, tempCanvas.height);
-}
-
-// ========================
-// END CCTV ANOMALY DETECTION
-// ========================
-
-function connectWebSocket() {
-    if (reconnectTimer) {
-        clearTimeout(reconnectTimer);
-        reconnectTimer = null;
-    }
-
-    console.log('🔌 Connecting WebSocket to', WS_URL);
-    ws = new WebSocket(WS_URL);
-    ws.binaryType = 'arraybuffer';
-
-    ws.onopen = () => {
-        console.log('✅ WebSocket Connected');
-        reconnectAttempts = 0;
-        document.getElementById('recognition-status').className = 'px-2 py-1 text-xs rounded bg-green-600';
-        document.getElementById('recognition-status').innerHTML = '<i class="fas fa-circle mr-1"></i>Connected';
-        startCamera();
-        startCCTV();
+// ── FPS helper ────────────────────────────────────────────────────────────────
+function makeFps() {
+    const b = new Float64Array(60); let i = 0, full = false;
+    return () => {
+        const now = performance.now(); b[i] = now;
+        i = (i+1)%60; if (i===0) full=true;
+        const n = full?60:i; if (n<2) return 0;
+        return Math.round((n-1)/((now-b[full?i:0])/1000));
     };
+}
+const tickDoor = makeFps(), tickYard = makeFps();
 
-    ws.onmessage = (event) => {
-        const data = JSON.parse(event.data);
+function b64Blob(b64) {
+    const bin=atob(b64), a=new Uint8Array(bin.length);
+    for(let i=0;i<bin.length;i++) a[i]=bin.charCodeAt(i);
+    return new Blob([a],{type:'image/jpeg'});
+}
 
-        if (data.type === 'ping') {
-            ws.send(JSON.stringify({ type: 'pong' }));
+// ═════════════════════════════════════════════════════════════════════════════
+// CAMERA SELECTOR
+// ═════════════════════════════════════════════════════════════════════════════
+async function loadCameras(reprobe = false) {
+    [elDoorSel, elYardSel].forEach(s => { s.innerHTML = '<option value="">Memuat…</option>'; s.disabled = true; });
+    elNote.innerHTML = '<i class="fas fa-spinner fa-spin text-blue-400 mr-1"></i>Mendeteksi kamera…';
+
+    try {
+        const endpoint = reprobe ? `${API_URL}/api/cameras/probe` : `${API_URL}/api/cameras`;
+        const method   = reprobe ? 'POST' : 'GET';
+        const d = await (await fetch(endpoint, { method })).json();
+        const cams = d.cameras || [];
+
+        if (!cams.length) {
+            [elDoorSel, elYardSel].forEach(s =>
+                s.innerHTML = '<option value="">Tidak ada kamera ditemukan</option>');
+            elNote.innerHTML =
+                '<i class="fas fa-exclamation-triangle text-red-400 mr-1"></i>' +
+                'Tidak ada kamera terdeteksi. Periksa sambungan USB ke Raspberry Pi.';
             return;
         }
 
-        if (data.type === 'result') {
-            console.log('📊 Data:', JSON.stringify({
-                face: data.face_detected,
-                matched: data.matched,
-                unlocked: data.unlocked,
-                name: data.name,
-                pct: data.percentage,
-                bbox: !!data.bbox,
-                quality: data.quality_issue,
-                ms: data.process_time_ms,
-                cnt: data.face_count
-            }));
-            updateRecognitionUI(data);
-        }
-    };
-
-    ws.onclose = (event) => {
-        console.log('❌ WS Disconnected, code:', event.code);
-        document.getElementById('recognition-status').className = 'px-2 py-1 text-xs rounded bg-red-600';
-        document.getElementById('recognition-status').innerHTML = '<i class="fas fa-times mr-1"></i>Disconnected';
-
-        reconnectAttempts++;
-        const delay = Math.min(1000 * Math.pow(1.5, reconnectAttempts), MAX_RECONNECT_DELAY);
-        reconnectTimer = setTimeout(connectWebSocket, delay);
-    };
-
-    ws.onerror = (err) => {
-        console.error('⚠️ WS Error:', err);
-    };
-}
-
-const urlParams = new URLSearchParams(window.location.search);
-const RECOG_DEVICE = urlParams.get('recog');
-const CCTV_DEVICE = urlParams.get('cctv');
-
-// === KAMERA 1: FACE RECOGNITION ===
-async function startCamera() {
-    try {
-        const constraints = {
-            video: {
-                width: { ideal: 640 },
-                height: { ideal: 480 }
-            }
+        const buildOptions = (currentId) => {
+            let html = '';
+            cams.forEach(c => {
+                const avail = c.available === true;
+                const icon  = avail ? '✅' : '⛔';
+                const label = avail
+                    ? `${c.node} — ${c.name} (${c.resolution})`
+                    : `${c.node} — ${c.name} [metadata only — tidak bisa capture]`;
+                const sel = c.id === currentId ? 'selected' : '';
+                const dis = avail ? '' : 'disabled';
+                html += `<option value="${c.id}" ${dis} ${sel}>${icon} ${label}</option>`;
+            });
+            return html;
         };
-        
-        if (RECOG_DEVICE) {
-            constraints.video.deviceId = { exact: RECOG_DEVICE };
-        }
-        
-        console.log('📷 Starting recog camera...');
-        const stream = await navigator.mediaDevices.getUserMedia(constraints);
-        video.srcObject = stream;
 
-        video.addEventListener('loadedmetadata', () => {
-            canvas.width = video.videoWidth;
-            canvas.height = video.videoHeight;
-            console.log('📷 Camera ready:', video.videoWidth, 'x', video.videoHeight, 'Canvas:', canvas.width, 'x', canvas.height);
-            sendFrames();
-        });
-    } catch (err) {
-        console.error('❌ Camera error:', err);
-        document.getElementById('recognition-status').className = 'px-2 py-1 text-xs rounded bg-red-600';
-        document.getElementById('recognition-status').innerHTML = '<i class="fas fa-exclamation-triangle mr-1"></i>Camera Error';
+        elDoorSel.innerHTML = buildOptions(d.door_cam_id);
+        elYardSel.innerHTML = buildOptions(d.yard_cam_id);
+        elDoorSel.disabled  = false;
+        elYardSel.disabled  = false;
+
+        const availCount = cams.filter(c => c.available).length;
+        elNote.innerHTML =
+            `<i class="fas fa-info-circle text-blue-400 mr-1"></i>` +
+            `${cams.length} node terdeteksi — ` +
+            `<span class="text-green-400 font-semibold">${availCount} dapat digunakan (✅)</span>, ` +
+            `sisanya metadata only (⛔). ` +
+            `Pintu: <code class="text-blue-300">/dev/video${d.door_cam_id}</code> · ` +
+            `CCTV: <code class="text-green-300">/dev/video${d.yard_cam_id}</code>`;
+
+    } catch(e) {
+        [elDoorSel, elYardSel].forEach(s =>
+            s.innerHTML = '<option value="">Backend tidak terjangkau</option>');
+        elNote.innerHTML =
+            `<i class="fas fa-times-circle text-red-400 mr-1"></i>Gagal terhubung: ${e.message}`;
     }
 }
 
-function sendFrames() {
-    const tempCanvas = document.createElement('canvas');
-    tempCanvas.width = video.videoWidth;
-    tempCanvas.height = video.videoHeight;
-    const tempCtx = tempCanvas.getContext('2d');
+async function applyCamera(role, selectEl, btnEl) {
+    const id = +selectEl.value;
+    if (isNaN(id) || selectEl.value === '') { alert('Pilih kamera terlebih dahulu.'); return; }
 
-    function capture() {
-        if (ws && ws.readyState === WebSocket.OPEN) {
-            tempCtx.drawImage(video, 0, 0);
-            const base64 = tempCanvas.toDataURL('image/jpeg', 0.7);
-            ws.send(JSON.stringify({ type: 'frame', image: base64 }));
-        }
-        setTimeout(capture, 150);
+    const selectedOpt = selectEl.options[selectEl.selectedIndex];
+    if (selectedOpt && selectedOpt.disabled) {
+        alert('Kamera ini (metadata only) tidak dapat digunakan.\nPilih node yang ditandai ✅.');
+        return;
     }
-    capture();
-}
 
-function updateRecognitionUI(data) {
-    updateFps();
-    
-    document.getElementById('face-count').textContent = data.face_count || 0;
-    document.getElementById('process-time').textContent = data.process_time_ms || 0;
+    btnEl.disabled = true;
+    btnEl.innerHTML = '<i class="fas fa-spinner fa-spin mr-1"></i>Menerapkan…';
 
-    // Draw bounding box
-    ctx.clearRect(0, 0, canvas.width, canvas.height);
-    
-    if (data.bbox && data.face_detected) {
-        const scaleX = canvas.width / (video.videoWidth || 1);
-        const scaleY = canvas.height / (video.videoHeight || 1);
-        
-        const x = (data.bbox.xmin || data.bbox.x || 0) * scaleX;
-        const y = (data.bbox.ymin || data.bbox.y || 0) * scaleY;
-        const w = (data.bbox.width || 0) * scaleX;
-        const h = (data.bbox.height || 0) * scaleY;
-        
-        const color = data.matched ? '#22c55e' : '#ef4444';
-        
-        ctx.strokeStyle = color;
-        ctx.lineWidth = 3;
-        ctx.shadowColor = color;
-        ctx.shadowBlur = 12;
-        ctx.strokeRect(x, y, w, h);
-        ctx.shadowBlur = 0;
+    try {
+        const res  = await fetch(`${API_URL}/api/cameras/${role}/${id}`, { method: 'POST' });
+        const data = await res.json();
 
-        const label = data.matched ? `${data.name} (${data.percentage}%)` : 'Unknown';
-        ctx.font = 'bold 14px sans-serif';
-        const textW = ctx.measureText(label).width;
-        ctx.fillStyle = 'rgba(0,0,0,0.6)';
-        ctx.fillRect(x, y - 26, textW + 12, 24);
-        ctx.fillStyle = color;
-        ctx.fillText(label, x + 6, y - 10);
+        if (!res.ok) {
+            const msg = data.detail || data.message || `HTTP ${res.status}`;
+            btnEl.innerHTML = '<i class="fas fa-times mr-1"></i>Gagal';
+            btnEl.className = btnEl.className.replace('btn-blue','btn-red');
+            elNote.innerHTML = `<i class="fas fa-times-circle text-red-400 mr-1"></i>Gagal: ${msg}`;
+            setTimeout(() => {
+                btnEl.innerHTML = '<i class="fas fa-check mr-1"></i>Terapkan';
+                btnEl.className = btnEl.className.replace('btn-red','btn-blue');
+                btnEl.disabled  = false;
+            }, 3000);
+            return;
+        }
 
-        const indWrap = document.getElementById('user-indicator-wrapper');
-        const ind = document.getElementById('user-indicator');
-        if (data.matched) {
-            indWrap.style.display = 'inline';
-            ind.textContent = `${data.name} (${data.percentage}%)`;
+        if (data.alive) {
+            btnEl.innerHTML = '<i class="fas fa-check mr-1"></i>Diterapkan!';
+            btnEl.className = btnEl.className.replace('btn-blue','btn-green');
+            elNote.innerHTML = `<i class="fas fa-check-circle text-green-400 mr-1"></i>${data.message}`;
         } else {
-            indWrap.style.display = 'none';
+            btnEl.innerHTML = '<i class="fas fa-clock mr-1"></i>Menunggu frame…';
+            elNote.innerHTML =
+                `<i class="fas fa-spinner fa-spin text-yellow-400 mr-1"></i>` +
+                `/dev/video${id} sedang dibuka, feed akan muncul otomatis…`;
         }
-    }
 
-    // Lock status
-    const lockIcon = document.getElementById('lock-icon');
-    const lockText = document.getElementById('lock-text');
-    const userInfo = document.getElementById('user-info');
-    const lockStatus = document.getElementById('lock-status');
-    const unlockOverlay = document.getElementById('unlock-overlay');
-    const unlockNameDisplay = document.getElementById('unlock-name-display');
-
-    if (data.unlocked) {
-        lockIcon.className = 'fas fa-lock-open text-2xl text-green-400 mr-2';
-        lockText.textContent = 'UNLOCKED';
-        lockStatus.className = 'inline-flex items-center px-4 py-2 rounded-lg bg-green-900/80 backdrop-blur-sm';
-        userInfo.textContent = `${data.name} (${data.percentage}%)`;
-        userInfo.className = 'ml-3 text-sm text-green-300';
-        userInfo.classList.remove('hidden');
-
-        unlockNameDisplay.textContent = data.name;
-        unlockOverlay.classList.add('show');
-
+        setTimeout(() => loadCameras(false), 1200);
         setTimeout(() => {
-            unlockOverlay.classList.remove('show');
-        }, 2000);
-    } else {
-        lockIcon.className = 'fas fa-lock text-2xl text-red-400 mr-2';
-        lockText.textContent = 'LOCKED';
-        lockStatus.className = 'inline-flex items-center px-4 py-2 rounded-lg bg-red-900/80 backdrop-blur-sm';
-        userInfo.classList.add('hidden');
-        unlockOverlay.classList.remove('show');
-    }
+            btnEl.innerHTML = '<i class="fas fa-check mr-1"></i>Terapkan';
+            btnEl.className = btnEl.className.replace('btn-green','btn-blue').replace('btn-red','btn-blue');
+            btnEl.disabled  = false;
+        }, 3000);
 
-    // Status badge
-    const statusBadge = document.getElementById('recognition-status');
-    if (data.quality_issue) {
-        statusBadge.className = 'px-2 py-1 text-xs rounded bg-orange-600';
-        statusBadge.innerHTML = `<i class="fas fa-exclamation-circle mr-1"></i>${data.quality_issue.replace('_', ' ')}`;
-    } else if (data.face_detected) {
-        statusBadge.className = 'px-2 py-1 text-xs rounded bg-blue-600';
-        statusBadge.innerHTML = '<i class="fas fa-face-smile mr-1"></i>Face detected';
-    } else {
-        statusBadge.className = 'px-2 py-1 text-xs rounded bg-yellow-600';
-        statusBadge.innerHTML = '<i class="fas fa-circle-notch fa-spin mr-1"></i>No face';
+    } catch(e) {
+        btnEl.innerHTML = '<i class="fas fa-times mr-1"></i>Error';
+        btnEl.className = btnEl.className.replace('btn-blue','btn-red');
+        btnEl.disabled  = false;
+        elNote.innerHTML = `<i class="fas fa-times-circle text-red-400 mr-1"></i>Error: ${e.message}`;
     }
 }
 
-// === KAMERA 2: CCTV MONITORING + ANOMALY DETECTION ===
-async function startCCTV() {
-    try {
-        const constraints = {
-            video: {
-                width: { ideal: 640 },
-                height: { ideal: 480 }
-            }
-        };
-        
-        if (CCTV_DEVICE) {
-            constraints.video.deviceId = { exact: CCTV_DEVICE };
+document.getElementById('btn-apply-door').addEventListener('click', () =>
+    applyCamera('door', elDoorSel, document.getElementById('btn-apply-door')));
+document.getElementById('btn-apply-yard').addEventListener('click', () =>
+    applyCamera('yard', elYardSel, document.getElementById('btn-apply-yard')));
+document.getElementById('btn-refresh-cameras').addEventListener('click', () => loadCameras(true));
+
+// ═════════════════════════════════════════════════════════════════════════════
+// DOOR — face recognition
+// ═════════════════════════════════════════════════════════════════════════════
+function displayFrame(b64) {
+    createImageBitmap(b64Blob(b64)).then(bmp => {
+        if (canvas.width!==bmp.width||canvas.height!==bmp.height){
+            canvas.width=bmp.width; canvas.height=bmp.height;
         }
-        
-        const stream = await navigator.mediaDevices.getUserMedia(constraints);
-        cctvVideo.srcObject = stream;
+        ctx.drawImage(bmp,0,0); bmp.close();
+        const fps=tickDoor(); elFpsCtr.textContent=fps;
+        elFpsCtr.className='val '+(fps<5?'fps-low':fps<15?'fps-mid':'fps-high');
+        if (lastResult) drawBbox(lastResult);
+    });
+}
 
-        cctvVideo.addEventListener('loadedmetadata', () => {
-            document.getElementById('cctv-status').className = 'px-2 py-1 text-xs rounded bg-green-600';
-            document.getElementById('cctv-status').innerHTML = '<i class="fas fa-circle mr-1"></i>LIVE';
-            
-            // Init CCTV canvas
-            cctvCanvas.width = cctvVideo.videoWidth;
-            cctvCanvas.height = cctvVideo.videoHeight;
-            
-            // Start CCTV analysis loop
-            setInterval(processCctvFrame, 500); // analyze every 500ms
-        });
-    } catch (err) {
-        console.error('CCTV error:', err);
-        document.getElementById('cctv-status').className = 'px-2 py-1 text-xs rounded bg-red-600';
-        document.getElementById('cctv-status').innerHTML = '<i class="fas fa-exclamation-triangle mr-1"></i>CCTV Unavailable';
+function drawBbox(data) {
+    if (!data.bbox||!data.face_detected) return;
+    const {xmin:x=0,ymin:y=0,width:w=0,height:h=0}=data.bbox;
+    const color=data.matched?'#22c55e':'#ef4444';
+    ctx.strokeStyle=color; ctx.lineWidth=3; ctx.shadowColor=color; ctx.shadowBlur=14;
+    ctx.strokeRect(x,y,w,h); ctx.shadowBlur=0;
+    const label=data.matched?`${data.name}  ${Math.round(data.percentage)}%`:'Unknown';
+    ctx.font='bold 13px system-ui';
+    const tw=ctx.measureText(label).width;
+    ctx.fillStyle=data.matched?'rgba(0,60,20,.75)':'rgba(60,0,0,.75)';
+    ctx.fillRect(x,y-24,tw+14,22); ctx.fillStyle='#fff'; ctx.fillText(label,x+7,y-7);
+}
+
+function updateRecogUI(data) {
+    lastResult=data;
+    elFaceCount.textContent=data.face_count||0;
+    elProcTime.textContent=data.process_time_ms||0;
+    drawBbox(data);
+    if (data.face_detected&&data.matched){
+        elIndWrap.classList.remove('hidden'); elIndWrap.style.display='inline-flex';
+        elInd.textContent=`${data.name} (${Math.round(data.percentage)}%)`;
+    } else elIndWrap.classList.add('hidden');
+    data.unlocked?setLock(true,data.name,data.percentage):setLock(false);
+    const qmap={too_small:'Terlalu jauh',too_close:'Terlalu dekat',multiple_faces:'Beberapa wajah'};
+    if (data.quality_issue){
+        elStatus.className='px-2 py-1 text-xs rounded bg-orange-600 flex items-center gap-1';
+        elStatus.innerHTML=`<i class="fas fa-exclamation-triangle"></i>${qmap[data.quality_issue]||data.quality_issue}`;
+    } else if (data.face_detected){
+        elStatus.className='px-2 py-1 text-xs rounded bg-blue-600 flex items-center gap-1';
+        elStatus.innerHTML='<i class="fas fa-face-smile"></i>Wajah terdeteksi';
+    } else {
+        elStatus.className='px-2 py-1 text-xs rounded bg-yellow-600 flex items-center gap-1';
+        elStatus.innerHTML='<i class="fas fa-circle-notch fa-spin"></i>Scanning…';
+        lastResult=null; elIndWrap.classList.add('hidden');
     }
 }
 
-// Start connection
-console.log('🚀 Initializing...');
-connectWebSocket();
+function setLock(ok,name='',pct=0){
+    if (ok){
+        elLockIcon.className='fas fa-lock-open text-xl text-green-400';
+        elLockText.textContent='UNLOCKED';
+        elLockStatus.className='inline-flex items-center px-4 py-2 rounded-lg bg-green-900/80 backdrop-blur-sm gap-2';
+        elUserInfo.textContent=`${name}  ${Math.round(pct)}%`;
+        elUserInfo.className='text-xs text-green-300'; elUserInfo.classList.remove('hidden');
+    } else {
+        elLockIcon.className='fas fa-lock text-xl text-red-400';
+        elLockText.textContent='LOCKED';
+        elLockStatus.className='inline-flex items-center px-4 py-2 rounded-lg bg-gray-900/80 backdrop-blur-sm gap-2';
+        elUserInfo.classList.add('hidden');
+    }
+}
+
+function handleUnlocked(data){
+    sessionLocked=true;
+    elUnlockName.textContent=data.name;
+    elUnlockPct.textContent=`Kecocokan: ${Math.round(data.percentage)}%`;
+    elUnlockOvr.classList.add('show'); setLock(true,data.name,data.percentage);
+    elStatus.className='px-2 py-1 text-xs rounded bg-green-600 flex items-center gap-1';
+    elStatus.innerHTML='<i class="fas fa-check-circle"></i>Access Granted';
+    setTimeout(()=>{
+        elUnlockOvr.classList.remove('show');
+        elCamOff.classList.add('show');
+        elBtnRestart.classList.remove('hidden');
+        ws?.close();
+    },3200);
+    addHistCard(data);
+}
+
+function addHistCard(e){
+    elHistEmpty.style.display='none';
+    const c=document.createElement('div'); c.className='history-card';
+    const ts=new Date(e.timestamp);
+    c.innerHTML=`${e.image?`<img src="${API_URL}/history/${e.image}" onerror="this.style.display='none'">`:''}
+    <div class="flex-1 min-w-0">
+      <div class="font-semibold text-sm text-white truncate">${e.name}</div>
+      <div class="text-xs text-gray-400">${ts.toLocaleDateString('id-ID')} ${ts.toLocaleTimeString('id-ID')}</div>
+      <div class="text-xs text-green-400 mt-0.5"><i class="fas fa-check-circle mr-1"></i>${Math.round(e.percentage)}% match</div>
+    </div><i class="fas fa-door-open text-green-400 text-lg"></i>`;
+    elHistList.insertBefore(c, elHistList.firstChild);
+}
+
+async function loadHistory(){
+    try {
+        const d=await(await fetch(`${API_URL}/api/history?limit=10`)).json();
+        if(d.history?.length){ elHistEmpty.style.display='none'; d.history.forEach(addHistCard); }
+    } catch {}
+}
+
+function restartSession(){
+    sessionLocked=false; lastResult=null;
+    elCamOff.classList.remove('show'); elUnlockOvr.classList.remove('show');
+    elBtnRestart.classList.add('hidden'); setLock(false);
+    elStatus.className='px-2 py-1 text-xs rounded bg-yellow-600 flex items-center gap-1';
+    elStatus.innerHTML='<i class="fas fa-circle-notch fa-spin"></i>Menghubungkan…';
+    canvas.width=320; canvas.height=240;
+    ctx.fillStyle='#111827'; ctx.fillRect(0,0,320,240);
+    ctx.fillStyle='#6b7280'; ctx.font='14px sans-serif'; ctx.textAlign='center';
+    ctx.fillText('Memulai ulang…',160,120);
+    setTimeout(startSession,300);
+}
+elBtnRestart.addEventListener('click', restartSession);
+elBtnCamOff.addEventListener('click', restartSession);
+
+function setConn(st){
+    const m={connecting:['text-yellow-400','Menghubungkan…'],online:['text-green-400','Online'],offline:['text-red-400','Offline']};
+    const[cls,txt]=m[st]||m.offline;
+    elConnDot.className=`fas fa-circle text-[8px] ${cls}`;
+    elConnText.textContent=txt; elConnText.className=`text-xs ${cls}`;
+}
+
+function startSession(){
+    if(rcTimer){ clearTimeout(rcTimer); rcTimer=null; }
+    if(ws && ws.readyState<=1) ws.close();
+    setConn('connecting');
+    ws=new WebSocket(WS_URL);
+    ws.onopen=()=>{ rcAttempts=0; setConn('online');
+        elStatus.className='px-2 py-1 text-xs rounded bg-green-600 flex items-center gap-1';
+        elStatus.innerHTML='<i class="fas fa-circle"></i>Terhubung — Scanning…'; };
+    ws.onmessage=({data:raw})=>{ let d; try{d=JSON.parse(raw);}catch{return;}
+        if(d.type==='ping') ws.send('{"type":"pong"}');
+        else if(d.type==='frame') displayFrame(d.image);
+        else if(d.type==='result') updateRecogUI(d);
+        else if(d.type==='unlocked_final') handleUnlocked(d);
+        else if(d.type==='error'){
+            elStatus.className='px-2 py-1 text-xs rounded bg-red-600 flex items-center gap-1';
+            elStatus.innerHTML=`<i class="fas fa-times-circle"></i>${d.message}`; } };
+    ws.onclose=()=>{ setConn('offline'); if(sessionLocked) return;
+        elStatus.className='px-2 py-1 text-xs rounded bg-red-600 flex items-center gap-1';
+        elStatus.innerHTML='<i class="fas fa-times"></i>Terputus';
+        rcAttempts++;
+        rcTimer=setTimeout(startSession, Math.min(1000*Math.pow(1.5,rcAttempts), MAX_RC)); };
+    ws.onerror=()=>{};
+}
+
+// ═════════════════════════════════════════════════════════════════════════════
+// YARD — CCTV / motion detection
+// ═════════════════════════════════════════════════════════════════════════════
+let motionFlashTimer=null;
+
+function displayYard(b64){
+    createImageBitmap(b64Blob(b64)).then(bmp=>{
+        if(yardCanvas.width!==bmp.width||yardCanvas.height!==bmp.height){
+            yardCanvas.width=bmp.width; yardCanvas.height=bmp.height;
+        }
+        yardCtx.drawImage(bmp,0,0); bmp.close();
+        const fps=tickYard(); elYardFps.textContent=fps;
+        elYardFps.className='val '+(fps<5?'fps-low':fps<12?'fps-mid':'fps-high');
+    });
+}
+
+function drawMotionBoxes(cnts){
+    if(!cnts?.length) return;
+    yardCtx.strokeStyle='#ef4444'; yardCtx.lineWidth=2;
+    yardCtx.shadowColor='#ef4444'; yardCtx.shadowBlur=8;
+    cnts.forEach(b=>yardCtx.strokeRect(b.x,b.y,b.w,b.h));
+    yardCtx.shadowBlur=0;
+}
+
+function handleMotion(data){
+    elMotionCount.textContent=data.contours?.length||0;
+    elMotionRatio.textContent=((data.motion_ratio||0)*100).toFixed(1)+'%';
+    drawMotionBoxes(data.contours);
+    if(data.alert){
+        elMotionFlash.classList.add('active');
+        clearTimeout(motionFlashTimer);
+        motionFlashTimer=setTimeout(()=>elMotionFlash.classList.remove('active'),800);
+        elMotionBadge.classList.remove('hidden');
+        elMotionChip.className='px-2 py-1 text-xs rounded bg-red-700 flex items-center gap-1';
+        elMotionChip.innerHTML='<i class="fas fa-exclamation-triangle text-white"></i><span class="text-white font-semibold">ALERT</span>';
+        clearTimeout(window._mbTimer);
+        window._mbTimer=setTimeout(()=>{
+            elMotionBadge.classList.add('hidden');
+            elMotionChip.className='px-2 py-1 text-xs rounded bg-green-700 flex items-center gap-1';
+            elMotionChip.innerHTML='<i class="fas fa-eye text-white"></i><span class="text-white">Memantau</span>';
+        },5000);
+        addMotionCard(data);
+    }
+}
+
+function addMotionCard(data){
+    elMotionEmpty.style.display='none';
+    const c=document.createElement('div');
+    c.className='motion-card'+(data.alert?' alert':'');
+    const ts=new Date().toLocaleTimeString('id-ID',{hour:'2-digit',minute:'2-digit',second:'2-digit'});
+    c.innerHTML=`<div class="flex-1 min-w-0">
+      <div class="text-xs font-semibold ${data.alert?'text-red-400':'text-yellow-400'}">
+        <i class="fas fa-${data.alert?'exclamation-triangle':'circle-dot'} mr-1"></i>
+        ${data.alert?'Objek Terdeteksi':'Gerakan Terdeteksi'}
+      </div>
+      <div class="text-xs text-gray-500">${ts} · ${data.contours?.length||0} objek · ${((data.motion_ratio||0)*100).toFixed(1)}%</div>
+    </div><i class="fas fa-bell ${data.alert?'text-red-400':'text-yellow-600'} text-sm flex-shrink-0"></i>`;
+    elMotionLogList.insertBefore(c, elMotionLogList.firstChild);
+    while(elMotionLogList.children.length>50) elMotionLogList.lastChild.remove();
+}
+
+function setYardConn(st){
+    const m={connecting:['text-yellow-400','Menghubungkan…'],online:['text-green-400','Memantau'],offline:['text-red-400','Offline']};
+    const[cls,txt]=m[st]||m.offline;
+    elYardConnDot.className=`fas fa-circle text-[8px] ${cls}`;
+    elYardConnText.textContent=txt; elYardConnText.className=`text-xs ${cls}`;
+    const bg=st==='online'?'bg-green-700':st==='connecting'?'bg-yellow-700':'bg-red-700';
+    elYardStatus.className=`px-2 py-1 text-xs rounded flex items-center gap-1 ${bg}`;
+    elYardStatus.innerHTML=st==='online'?'<i class="fas fa-eye"></i>Aktif'
+        :st==='connecting'?'<i class="fas fa-circle-notch fa-spin"></i>Menghubungkan…'
+        :'<i class="fas fa-times"></i>Terputus';
+    elMotionChip.className=`px-2 py-1 text-xs rounded ${st==='online'?'bg-green-700':'bg-gray-700'} flex items-center gap-1`;
+    elMotionChip.innerHTML=st==='online'
+        ?'<i class="fas fa-eye text-white"></i><span class="text-white">Memantau</span>'
+        :'<i class="fas fa-circle-notch fa-spin text-gray-400"></i><span class="text-gray-400">Menghubungkan…</span>';
+}
+
+function startMotion(){
+    if(rcMotionTimer){ clearTimeout(rcMotionTimer); rcMotionTimer=null; }
+    if(wsMotion && wsMotion.readyState<=1) wsMotion.close();
+    setYardConn('connecting');
+    wsMotion=new WebSocket(WS_MOT_URL);
+    wsMotion.onopen=()=>{ rcMotionAttempts=0; setYardConn('online'); };
+    wsMotion.onmessage=({data:raw})=>{ let d; try{d=JSON.parse(raw);}catch{return;}
+        if(d.type==='ping') wsMotion.send('{"type":"pong"}');
+        else if(d.type==='frame') displayYard(d.image);
+        else if(d.type==='motion') handleMotion(d);
+        else if(d.type==='error'){
+            setYardConn('offline');
+            elYardStatus.innerHTML=`<i class="fas fa-times"></i>${d.message}`; } };
+    wsMotion.onclose=()=>{ setYardConn('offline');
+        rcMotionAttempts++;
+        rcMotionTimer=setTimeout(startMotion, Math.min(1000*Math.pow(1.5,rcMotionAttempts), MAX_RC)); };
+    wsMotion.onerror=()=>{};
+}
+
+document.getElementById('btn-clear-motion').addEventListener('click', async()=>{
+    if(!confirm('Hapus seluruh log deteksi gerakan?')) return;
+    elMotionLogList.innerHTML='';
+    elMotionLogList.appendChild(elMotionEmpty);
+    elMotionEmpty.style.display='';
+});
+
+// ═════════════════════════════════════════════════════════════════════════════
+// INIT
+// ═════════════════════════════════════════════════════════════════════════════
+canvas.width=320; canvas.height=240;
+ctx.fillStyle='#111827'; ctx.fillRect(0,0,320,240);
+ctx.fillStyle='#4b5563'; ctx.font='bold 14px sans-serif'; ctx.textAlign='center';
+ctx.fillText('Menghubungkan ke kamera pintu…',160,115);
+
+yardCanvas.width=320; yardCanvas.height=240;
+yardCtx.fillStyle='#0d1117'; yardCtx.fillRect(0,0,320,240);
+yardCtx.fillStyle='#374151'; yardCtx.font='bold 13px sans-serif'; yardCtx.textAlign='center';
+yardCtx.fillText('Menghubungkan ke CCTV…',160,120);
+
+loadCameras();
+loadHistory();
+startSession();
+startMotion();
 </script>
 @endpush

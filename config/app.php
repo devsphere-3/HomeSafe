@@ -13,7 +13,16 @@ return [
     |
     */
 
-    'name' => env('APP_NAME', 'Laravel'),
+    'name' => env('APP_NAME', 'HomeSafe'),
+
+    /*
+    |--------------------------------------------------------------------------
+    | Python Backend URL
+    |--------------------------------------------------------------------------
+    | URL of the FastAPI backend running on the Raspberry Pi.
+    | Set BACKEND_URL in your .env file.
+    */
+    'backend_url' => env('BACKEND_URL', 'http://192.168.1.10:5001'),
 
     /*
     |--------------------------------------------------------------------------

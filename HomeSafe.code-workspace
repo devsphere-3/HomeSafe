@@ -1,0 +1,17 @@
+{
+	"folders": [
+		{
+			"path": "."
+		}
+	],
+	"settings": {
+		"liveServer.settings.multiRootWorkspaceName": "project",
+		"python-envs.pythonProjects": [
+			{
+				"path": "tester/backend",
+				"envManager": "ms-python.python:venv",
+				"packageManager": "ms-python.python:pip"
+			}
+		]
+	}
+}

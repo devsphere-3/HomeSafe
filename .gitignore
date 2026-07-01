@@ -28,4 +28,20 @@ backend/mediapipe-env/
 backend/__pycache__/Master/  
 gcm-diagnose.log 
 composer  
-composer-setup.php 
+composer-setup.php
+
+# Backend - Python
+backend/venv/
+backend/**/__pycache__/
+backend/*.pyc
+backend/*.pyo
+backend/*.pyd
+backend/.env
+backend/*.log
+
+# Backend - Data files (contains sensitive face data)
+backend/database.json
+
+# Backend - OS
+.DS_Store
+Thumbs.db
