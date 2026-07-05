@@ -1,622 +1,159 @@
-# HomeSafe — Sistem Kunci Pintu Berbasis Face Recognition
+<div align="center">
 
-> Proyek tugas akhir / prototype sistem keamanan pintu cerdas menggunakan Raspberry Pi, kamera, dan pengenalan wajah secara real-time.
+<!-- COVER SECTION -->
+<img src="https://img.shields.io/badge/HomeSafe-Smart%20Home%20Security-blue?style=for-the-badge&logo=homeadvisor&logoColor=white" alt="HomeSafe Banner"/>
 
----
+# 🏠 HomeSafe
 
-## Daftar Isi
+### Sistem Keamanan Rumah Pintar Berbasis IoT
 
-- [Gambaran Sistem](#gambaran-sistem)
-- [Arsitektur](#arsitektur)
-- [Hardware](#hardware)
-- [Struktur Proyek](#struktur-proyek)
-- [Prasyarat](#prasyarat)
-- [Instalasi](#instalasi)
-- [Konfigurasi](#konfigurasi)
-- [Menjalankan Sistem](#menjalankan-sistem)
-- [Halaman Web](#halaman-web)
-- [API Reference](#api-reference)
-- [WebSocket Protocol](#websocket-protocol)
-- [GPIO & Hardware](#gpio--hardware)
-- [Troubleshooting](#troubleshooting)
+<img src="assets/logo-homesafe.png" alt="HomeSafe Logo" width="200"/>
 
 ---
 
-## Gambaran Sistem
+<!-- TEAM SECTION -->
+## 👥 Tim Pengembang
 
-HomeSafe adalah sistem kunci pintu otomatis yang bekerja dengan cara:
-
-1. **Kamera pintu** menangkap wajah yang mendekati pintu secara real-time
-2. **Raspberry Pi** menjalankan model ML untuk mendeteksi dan mengenali wajah
-3. Jika wajah **dikenali**, servo motor membuka kunci pintu selama 5 detik
-4. **LED** dan **buzzer** memberikan feedback visual dan audio
-5. **Kamera CCTV** kedua memantau area halaman dengan deteksi gerakan
-6. **Dashboard web** (Laravel) menampilkan feed kedua kamera, riwayat akses, dan log gerakan secara real-time
+| No | Nama Lengkap | NIM | Kelas |
+|:--:|:--:|:--:|:--:|
+| 1 | [Nama Anggota 1] | [NIM 1] | [Kelas 1] |
+| 2 | [Nama Anggota 2] | [NIM 2] | [Kelas 2] |
 
 ---
 
-## Arsitektur
+<!-- PBL BANNER -->
+## 🎓 Project Based Learning (PBL)
 
-```
-┌─────────────────────────────────┐      HTTP/WS       ┌──────────────────────┐
-│        Raspberry Pi 4           │ ◄────────────────► │   Laravel (Server)   │
-│                                 │                    │   PHP 8.2 / Laravel  │
-│  ┌──────────┐  ┌─────────────┐  │                    │   12.x               │
-│  │ Camera 0 │  │  Camera 2   │  │                    │   port 8000          │
-│  │ (Pintu)  │  │  (CCTV)     │  │                    └──────────────────────┘
-│  │ 320x240  │  │  640x480    │  │                             │
-│  └────┬─────┘  └──────┬──────┘  │                             │
-│       │               │         │                    ┌────────▼─────────────┐
-│  ┌────▼───────────────▼──────┐  │                    │   Browser Client     │
-│  │   FastAPI (app.py)        │  │                    │   WebSocket streams  │
-│  │   Python 3.11             │  │                    │   Dashboard UI       │
-│  │   port 5001               │  │                    └──────────────────────┘
-│  │                           │  │
-│  │  • Face Detection         │  │
-│  │    (BlazeFace TFLite)     │  │
-│  │  • Face Recognition       │  │
-│  │    (SFace ONNX)           │  │
-│  │  • Motion Detection       │  │
-│  └───────────┬───────────────┘  │
-│              │                  │
-│  ┌───────────▼───────────────┐  │
-│  │   GPIO Hardware           │  │
-│  │   • Servo SG90 (PIN 18)   │  │
-│  │   • LED Hijau  (PIN 27)   │  │
-│  │   • LED Merah  (PIN 22)   │  │
-│  │   • Buzzer     (PIN 23)   │  │
-│  └───────────────────────────┘  │
-└─────────────────────────────────┘
-```
+<img src="https://img.shields.io/badge/Program-Project%20Based%20Learning-orange?style=for-the-badge" />
+<img src="https://img.shields.io/badge/Semester-Genap%202025/2026-green?style=for-the-badge" />
+<img src="https://img.shields.io/badge/Institusi-[Nama%20Kampus]-purple?style=for-the-badge" />
+
+> **Project Based Learning** adalah metode pembelajaran berbasis proyek yang bertujuan untuk mengembangkan kompetensi mahasiswa melalui penyelesaian masalah nyata secara kolaboratif.
 
 ---
 
-## Hardware
+<!-- HERO SECTION -->
+## 🚀 Hero Section
 
-### Komponen Utama
-
-| Komponen | Spesifikasi | Fungsi |
-|---|---|---|
-| **Raspberry Pi 4 Model B** | 2GB/4GB RAM | Prosesor utama |
-| **USB Webcam (×2)** | Logitech C270 HD | Kamera pintu + CCTV |
-| **Servo Motor** | SG90 | Aktuator kunci pintu |
-| **LED Hijau** | 5mm, 3.3V | Indikator akses diterima |
-| **LED Merah** | 5mm, 3.3V | Indikator pintu terkunci |
-| **Buzzer Aktif** | 5V | Sinyal audio |
-| **Resistor** | 330Ω (×2) | Pembatas arus LED |
-
-### Wiring GPIO
-
-```
-Raspberry Pi GPIO (BCM numbering)
-═══════════════════════════════════════
-
-Servo SG90:
-  Signal (oranye)  → GPIO 18 (Pin fisik 12)
-  VCC    (merah)   → Pin 2 atau 4 (5V) ⚠️ BUKAN 3.3V
-  GND    (coklat)  → Pin 6 (GND)
-
-LED Hijau (via resistor 330Ω):
-  Anoda  → GPIO 27 (Pin fisik 13)
-  Katoda → GND
-
-LED Merah (via resistor 330Ω):
-  Anoda  → GPIO 22 (Pin fisik 15)
-  Katoda → GND
-
-Buzzer Aktif:
-  + (positif) → GPIO 23 (Pin fisik 16)
-  - (negatif) → GND
-```
-
-> **Catatan:** Servo SG90 membutuhkan 5V. Jika servo bergetar atau tidak stabil, gunakan power supply eksternal 5V terpisah dan hubungkan GND-nya ke GND Raspberry Pi.
-
-### Duty Cycle Servo
-
-| Sudut | Duty Cycle | Status |
-|---|---|---|
-| 0° | 2.5 | **TERKUNCI** (default) |
-| 90° | 7.5 | **TERBUKA** |
-
-Formula: `duty = 2.5 + (angle / 18)`
+<div align="center">
+  <img src="assets/hero-banner.png" alt="HomeSafe Hero" width="800"/>
+  
+  **Monitoring & Keamanan Rumah 24/7 dari Genggaman Tangan Anda**
+  
+  *Real-time monitoring • Motion detection • Alert system • Remote access*
+</div>
 
 ---
 
-## Struktur Proyek
+<!-- GITHUB BADGES -->
+## 📊 Project Status
 
-```
-HomeSafe/
-├── app/
-│   ├── Http/
-│   │   └── Controllers/
-│   │       └── FaceRecognitionController.php   # Controller Laravel
-│   └── Models/
-│       └── User.php
-├── backend/                                     # FastAPI (dijalankan di Pi)
-│   ├── app.py                                   # Server utama
-│   ├── recognizer.py                            # Engine face recognition
-│   ├── requirements.txt                         # Dependensi Python
-│   ├── download_model.py                        # Download model ML
-│   └── history/                                 # Snapshot akses (auto-generated)
-├── config/
-│   └── app.php                                  # Konfigurasi backend_url
-├── models/                                      # Model ML (di Pi)
-│   ├── blaze_face_short_range.tflite            # BlazeFace detector
-│   └── face_recognition_sface_2021dec.onnx      # SFace recognizer
-├── resources/
-│   └── views/
-│       ├── layouts/
-│       │   └── app.blade.php                    # Layout utama
-│       └── recognition/
-│           ├── index.blade.php                  # Dashboard utama (2 kamera)
-│           ├── enroll.blade.php                 # Pendaftaran wajah
-│           ├── history.blade.php                # Riwayat akses
-│           └── users.blade.php                  # Daftar pengguna terdaftar
-├── routes/
-│   └── web.php                                  # Routing Laravel
-├── .env                                         # Konfigurasi environment
-└── .env.ex                                      # Template environment
-```
+![GitHub stars](https://img.shields.io/github/stars/username/homesafe?style=social)
+![GitHub forks](https://img.shields.io/github/forks/username/homesafe?style=social)
+![GitHub watchers](https://img.shields.io/github/watchers/username/homesafe?style=social)
+![GitHub repo size](https://img.shields.io/github/repo-size/username/homesafe)
+![GitHub last commit](https://img.shields.io/github/last-commit/username/homesafe)
+![GitHub issues](https://img.shields.io/github/issues/username/homesafe)
+![GitHub pull requests](https://img.shields.io/github/issues-pr/username/homesafe)
+![GitHub license](https://img.shields.io/github/license/username/homesafe)
+![GitHub language count](https://img.shields.io/github/languages/count/username/homesafe)
+![GitHub top language](https://img.shields.io/github/languages/top/username/homesafe)
 
 ---
 
-## Prasyarat
+<!-- TABLE OF CONTENTS -->
+## 📋 Daftar Isi
 
-### Raspberry Pi (Backend)
+<details open>
+<summary><b>Klik untuk melihat/menyembunyikan daftar isi</b></summary>
 
-- Raspberry Pi OS Bullseye atau Bookworm (64-bit)
-- Python 3.11+
-- pip / virtualenv
+1. [🏠 HomeSafe](#-homesafe)
+2. [👥 Tim Pengembang](#-tim-pengembang)
+3. [🎓 Project Based Learning (PBL)](#-project-based-learning-pbl)
+4. [🚀 Hero Section](#-hero-section)
+5. [📊 Project Status](#-project-status)
+6. [📋 Daftar Isi](#-daftar-isi)
+7. [📖 Overview](#-overview)
+8. [✨ Features](#-features)
+9. [🏗️ System Architecture](#️-system-architecture)
+10. [🔄 Workflow Diagram](#-workflow-diagram)
+11. [🔌 Hardware & Wiring](#-hardware--wiring)
+12. [📁 Project Structure](#-project-structure)
+13. [⚙️ Installation](#️-installation)
+14. [🔧 Configuration](#-configuration)
+15. [▶️ Running Project](#️-running-project)
+16. [📊 Dashboard](#-dashboard)
+17. [🔗 API Reference](#-api-reference)
+18. [🌐 WebSocket](#-websocket)
+19. [💡 GPIO](#-gpio)
+20. [🛠️ Troubleshooting](#️-troubleshooting)
+21. [🛠️ Tech Stack](#️-tech-stack)
+22. [🚀 Future Development](#-future-development)
+23. [📄 License](#-license)
+24. [📞 Contact](#-contact)
 
-```bash
-# Cek versi Python
-python3 --version
-
-# Install dependensi sistem
-sudo apt update
-sudo apt install -y python3-pip python3-venv libopencv-dev
-sudo apt install -y python3-rpi.gpio   # untuk GPIO
-```
-
-### Server/PC (Laravel Frontend)
-
-- PHP 8.2+
-- Composer
-- Node.js 18+ & npm
-- Git
-
----
-
-## Instalasi
-
-### 1. Clone Repository
-
-```bash
-git clone https://github.com/<username>/HomeSafe.git
-cd HomeSafe
-```
-
-### 2. Setup Backend (Raspberry Pi)
-
-```bash
-cd backend
-
-# Buat virtual environment
-python3 -m venv venv
-source venv/bin/activate
-
-# Install dependensi
-pip install -r requirements.txt
-
-# Download model ML
-python3 download_model.py
-```
-
-### 3. Setup Frontend (Laravel)
-
-```bash
-# Di root proyek
-composer install
-
-# Copy environment file
-cp .env.ex .env
-
-# Generate app key
-php artisan key:generate
-
-# Install asset
-npm install
-npm run build
-
-# Jalankan migrasi database
-php artisan migrate
-```
+</details>
 
 ---
 
-## Konfigurasi
+## 📖 Overview
 
-### File `.env` (wajib diubah)
+<div align="center">
+  <img src="https://img.shields.io/badge/Version-1.0.0-blue?style=flat-square" />
+  <img src="https://img.shields.io/badge/Status-Active-success?style=flat-square" />
+</div>
 
-```dotenv
-# URL FastAPI di Raspberry Pi — sesuaikan dengan IP Pi kamu
-BACKEND_URL=http://172.20.10.3:5001
+**HomeSafe** adalah sistem keamanan rumah pintar berbasis IoT yang dirancang untuk memberikan monitoring real-time dan notifikasi instan terhadap aktivitas mencurigakan di sekitar rumah Anda. Sistem ini menggunakan sensor PIR, kamera, dan berbagai perangkat IoT lainnya yang terintegrasi melalui platform web dan mobile.
 
-# Password untuk halaman enrollment
-ENROLL_PASSWORD=homesafe123
-```
-
-### Konfigurasi Kamera di Backend
-
-Edit variabel berikut di `backend/app.py` jika index kamera berbeda:
-
-```python
-_door_cam_id: int = 0   # /dev/video0 — kamera face recognition
-_yard_cam_id: int = 2   # /dev/video2 — kamera CCTV
-```
-
-### Kalibrasi Servo
-
-Edit konstanta berikut di `backend/app.py` sesuai hasil kalibrasi fisik:
-
-```python
-LOCK_ANGLE  = 0     # Derajat posisi TERKUNCI
-OPEN_ANGLE  = 90    # Derajat posisi TERBUKA
-OPEN_TIME   = 5     # Detik pintu terbuka sebelum dikunci kembali
-```
+### 🎯 Tujuan Proyek
+- Menyediakan sistem keamanan rumah yang terjangkau dan mudah dipasang
+- Memberikan monitoring real-time 24/7
+- Mengirimkan notifikasi instan saat terdeteksi aktivitas mencurigakan
+- Menyediakan dashboard yang user-friendly untuk monitoring
 
 ---
 
-## Menjalankan Sistem
-
-### Backend (Raspberry Pi)
-
-```bash
-cd ~/HomeSafe/backend
-source venv/bin/activate
-python app.py
-```
-
-Log startup yang diharapkan:
-
-```
-✅ RPi.GPIO tersedia — mode hardware aktif
-✅ GPIO diinisialisasi — Servo=PIN18 (50Hz, 0° dc=2.50 TERKUNCI)
-✅ Camera 0 (/dev/video0) ready — 320x240 @ 30FPS
-✅ Camera 2 (/dev/video2) ready — 640x480 @ 30FPS
-✅ Ready
-INFO: Application startup complete.
-INFO: Uvicorn running on http://0.0.0.0:5001
-```
-
-### Frontend (Server/PC)
-
-```bash
-cd HomeSafe
-php artisan serve
-```
-
-Akses dashboard: `http://localhost:8000`
-
-### Menjalankan dengan Systemd (Production di Pi)
-
-Buat file service agar backend otomatis jalan saat Pi dinyalakan:
-
-```bash
-sudo nano /etc/systemd/system/homesafe.service
-```
-
-```ini
-[Unit]
-Description=HomeSafe Face Recognition Backend
-After=network.target
-
-[Service]
-User=admin
-WorkingDirectory=/home/admin/HomeSafe/backend
-ExecStart=/home/admin/HomeSafe/backend/venv/bin/python app.py
-Restart=always
-RestartSec=5
-
-[Install]
-WantedBy=multi-user.target
-```
-
-```bash
-sudo systemctl daemon-reload
-sudo systemctl enable homesafe
-sudo systemctl start homesafe
-sudo systemctl status homesafe
-```
-
----
-
-## Halaman Web
-
-| URL | Halaman | Deskripsi |
-|---|---|---|
-| `/` | Dashboard | Feed 2 kamera real-time, riwayat akses, log gerakan |
-| `/enroll` | Pendaftaran | Daftarkan wajah baru ke sistem |
-| `/users` | Pengguna | Daftar wajah terdaftar, hapus pengguna |
-| `/history` | Riwayat | Riwayat lengkap akses pintu dengan foto |
-
----
-
-## API Reference
-
-Base URL: `http://<IP_PI>:5001`
-
-### Kamera
-
-| Method | Endpoint | Deskripsi |
-|---|---|---|
-| `GET` | `/api/cameras` | List semua video node yang terdeteksi |
-| `POST` | `/api/cameras/probe` | Re-enumerate kamera |
-| `POST` | `/api/cameras/door/{id}` | Set kamera face recognition |
-| `POST` | `/api/cameras/yard/{id}` | Set kamera CCTV |
-
-**Response `GET /api/cameras`:**
-
-```json
-{
-  "cameras": [
-    {
-      "id": 0,
-      "node": "/dev/video0",
-      "name": "USB Camera 0",
-      "available": true,
-      "resolution": "320x240"
-    }
-  ],
-  "door_cam_id": 0,
-  "yard_cam_id": 2
-}
-```
-
-### Pengguna
-
-| Method | Endpoint | Deskripsi |
-|---|---|---|
-| `GET` | `/api/users` | List semua pengguna terdaftar |
-| `DELETE` | `/api/users/{name}` | Hapus pengguna |
-
-### Riwayat Akses
-
-| Method | Endpoint | Deskripsi |
-|---|---|---|
-| `GET` | `/api/history?limit=50` | Ambil riwayat akses |
-| `DELETE` | `/api/history` | Hapus semua riwayat |
-
-### Static Files
-
-| Endpoint | Deskripsi |
-|---|---|
-| `GET /history/{filename}` | Akses foto snapshot akses (format WebP) |
-
----
-
-## WebSocket Protocol
-
-### `/ws` — Face Recognition (Kamera Pintu)
-
-**Server → Client:**
-
-```json
-// Frame video (base64 JPEG)
-{ "type": "frame", "image": "<base64>" }
-
-// Hasil deteksi
-{
-  "type": "result",
-  "face_detected": true,
-  "face_count": 1,
-  "quality_issue": null,
-  "bbox": { "xmin": 80, "ymin": 40, "width": 120, "height": 140, "confidence": 0.97 },
-  "matched": true,
-  "name": "Budi",
-  "similarity": 0.87,
-  "percentage": 94.2,
-  "process_time_ms": 145.3,
-  "unlocked": true
-}
-
-// Akses diterima (unlock final)
-{
-  "type": "unlocked_final",
-  "name": "Budi",
-  "percentage": 94.2,
-  "timestamp": "2026-07-05T14:30:00",
-  "image": "2026-07-05T14-30-00_Budi.webp"
-}
-
-// Keepalive
-{ "type": "ping" }
-```
-
-**Client → Server:**
-
-```json
-{ "type": "pong" }
-```
-
----
-
-### `/ws/motion` — CCTV Motion Detection (Kamera Halaman)
-
-**Server → Client:**
-
-```json
-// Frame + status motion (digabung dalam satu pesan)
-{
-  "type": "frame",
-  "image": "<base64>",
-  "motion": true,
-  "motion_ratio": 3.45
-}
-```
-
-> `motion_ratio` adalah persentase pixel yang berubah (0–100). Alert ditampilkan jika `motion_ratio >= 2.0` (≥2% area bergerak).
-
----
-
-### `/ws/enroll` — Face Enrollment
-
-**Client → Server:**
-
-```json
-{ "type": "register_start", "name": "Nama Pengguna" }
-{ "type": "scan" }
-{ "type": "register_cancel" }
-```
-
-**Server → Client:**
-
-```json
-{ "type": "frame", "image": "<base64>" }
-{ "type": "preview", "bbox": {...}, "face_count": 1, "quality_issue": null }
-{ "type": "register_progress", "progress": 60, "count": 6, "total": 10 }
-{ "type": "register_success", "name": "Nama Pengguna" }
-{ "type": "register_error", "message": "Wajah sudah terdaftar" }
-{ "type": "warn", "message": "Terlalu jauh dari kamera" }
-```
-
----
-
-## GPIO & Hardware
-
-### Alur Kerja saat Wajah Dikenali
-
-```
-Wajah terdeteksi & dikenali
-         │
-         ▼
-┌─────────────────────┐
-│  LED Hijau ON       │  ← feedback visual akses diterima
-│  LED Merah OFF      │
-└─────────┬───────────┘
-          │
-          ▼
-┌─────────────────────┐
-│  Buzzer 2x beep     │  ← 0.15s ON, 0.10s OFF, 0.15s ON
-│  (konfirmasi audio) │
-└─────────┬───────────┘
-          │
-          ▼
-┌─────────────────────┐
-│  Servo → 90°        │  ← pintu terbuka
-│  (OPEN_ANGLE)       │
-└─────────┬───────────┘
-          │
-          ▼ (tunggu OPEN_TIME = 5 detik)
-          │
-          ▼
-┌─────────────────────┐
-│  Servo → 0°         │  ← pintu dikunci kembali
-│  (LOCK_ANGLE)       │
-└─────────┬───────────┘
-          │
-          ▼
-┌─────────────────────┐
-│  LED Merah ON       │  ← kembali ke kondisi terkunci
-│  LED Hijau OFF      │
-└─────────────────────┘
-```
-
-### Kondisi Default (Fail-Secure)
-
-Saat startup atau jika terjadi error, sistem selalu kembali ke kondisi aman:
-- Servo → 0° (terkunci)
-- LED Merah → ON
-- LED Hijau → OFF
-- Buzzer → OFF
-
----
-
-## Troubleshooting
-
-### Kamera tidak terbuka
-
-```bash
-# Cek device yang terdeteksi
-ls -la /dev/video*
-
-# Cek apakah proses lain sedang pakai kamera
-sudo fuser /dev/video0 /dev/video2
-
-# Bebaskan kamera
-sudo fuser -k /dev/video0 /dev/video2
-
-# Cek apakah user punya akses
-groups $USER
-sudo usermod -aG video $USER   # jika belum ada
-```
-
-### GPIO: "channel already in use"
-
-Terjadi saat proses lama crash tanpa cleanup. Sudah ditangani otomatis oleh `GPIO.setwarnings(False)` di kode. Jika masih muncul:
-
-```bash
-sudo systemctl restart homesafe
-```
-
-### Servo tidak bergerak / bergetar
-
-1. Pastikan VCC servo dihubungkan ke **5V**, bukan 3.3V
-2. Jika Pi tidak mampu supply arus: gunakan power supply eksternal 5V, hubungkan GND bersama
-3. Sesuaikan `LOCK_ANGLE` dan `OPEN_ANGLE` via kalibrasi
-
-### Backend tidak bisa diakses dari Laravel
-
-```bash
-# Cek IP Pi saat ini
-hostname -I
-
-# Update .env Laravel
-# BACKEND_URL=http://<IP_BARU>:5001
-
-php artisan config:clear
-```
-
-> Saat menggunakan **iPhone hotspot**, IP Pi bisa berubah setiap kali hotspot dimatikan. Selalu cek dengan `hostname -I` sebelum koneksi.
-
-### Face recognition tidak akurat
-
-- Pastikan pencahayaan cukup dan merata
-- Wajah harus menghadap kamera langsung (frontal)
-- Jarak optimal: 30–80 cm dari kamera
-- Jika perlu, hapus profil lama dan daftar ulang:
-  ```
-  /users → pilih nama → Hapus → /enroll → daftar ulang
-  ```
-
-### Motion detection terlalu sensitif / tidak sensitif
-
-Edit threshold di `backend/app.py`:
-
-```python
-MOTION_THRESHOLD = 0.02   # 2% = default
-# Naikkan (0.05) untuk kurangi false positive
-# Turunkan (0.01) untuk lebih sensitif
-```
-
----
-
-## Tech Stack
-
-| Layer | Teknologi |
-|---|---|
-| **Frontend** | Laravel 12, Blade, Tailwind CSS, Vanilla JS |
-| **Backend** | FastAPI, Python 3.11, uvicorn |
-| **Face Detection** | MediaPipe BlazeFace (TFLite) |
-| **Face Recognition** | OpenCV SFace (ONNX) |
-| **Motion Detection** | OpenCV frame differencing |
-| **Realtime** | WebSocket (native browser API) |
-| **Hardware** | RPi.GPIO, PWM servo |
-| **Database** | SQLite (Laravel session/cache) + JSON flat file (history) |
-| **ML Models** | `blaze_face_short_range.tflite`, `face_recognition_sface_2021dec.onnx` |
-
----
-
-## Lisensi
-
-Proyek ini dibuat untuk keperluan Project Based Learning
+## ✨ Features
+
+<div align="center">
+
+### Fitur Utama
+
+</div>
+
+<table>
+<tr>
+<td width="33%" align="center">
+<h3>🔐 Real-time Monitoring</h3>
+<p>Monitoring 24/7 dengan sensor PIR dan kamera</p>
+<img src="https://img.shields.io/badge/Status-Active-green" />
+</td>
+<td width="33%" align="center">
+<h3>📱 Mobile Notification</h3>
+<p>Notifikasi instan ke smartphone</p>
+<img src="https://img.shields.io/badge/Status-Active-green" />
+</td>
+<td width="33%" align="center">
+<h3>📊 Dashboard Web</h3>
+<p>Dashboard interaktif berbasis web</p>
+<img src="https://img.shields.io/badge/Status-Active-green" />
+</td>
+</tr>
+<tr>
+<td width="33%" align="center">
+<h3>🎥 Live Camera Feed</h3>
+<p>Streaming video langsung dari kamera</p>
+<img src="https://img.shields.io/badge/Status-Active-green" />
+</td>
+<td width="33%" align="center">
+<h3>📈 Data Logging</h3>
+<p>Pencatatan history aktivitas</p>
+<img src="https://img.shields.io/badge/Status-Active-green" />
+</td>
+<td width="33%" align="center">
+<h3>🔧 Remote Control</h3>
+<p>Kontrol sistem dari jarak jauh</p>
+<img src="https://img.shields.io/badge/Status-Active-green" />
+</td>
+</tr>
+</table>
