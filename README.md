@@ -1,7 +1,7 @@
 <div align="center">
 
 <!-- INSTITUTION LOGO -->
-<img src="https://upload.wikimedia.org/wikipedia/id/9/9f/Logo_Politeknik_Negeri_Batam.png" alt="Logo Politeknik Negeri Batam" width="180"/>
+<img src="https://static.wikia.nocookie.net/logopedia/images/2/2c/Politeknik_Negeri_Batam.png/revision/latest/scale-to-width-down/1200?cb=20190922200954" width="180"/>
 
 ### 🎓 Politeknik Negeri Batam
 *FOR THE GOALS BEYOND HORIZON*
