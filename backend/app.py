@@ -1,11 +1,17 @@
 """
 Smart Lock – Face Recognition API
-Optimized for Raspberry Pi: dedicated camera thread + async pipeline
+Raspberry Pi: dual camera (door + yard), asyncio pipeline, GPIO servo
 
-One-shot unlock logic:
-  - Recognition runs continuously until 1 confirmed match is found
-  - On match: save a WebP snapshot to history/, stop recognition, send 'unlocked_final'
-  - Camera keeps streaming (for the access-granted visual), then frontend closes WS
+Endpoints:
+  WS  /ws           — face recognition stream (door camera)
+  WS  /ws/enroll    — face enrollment (door camera)
+  WS  /ws/motion    — CCTV motion detection stream (yard camera)
+  GET /api/cameras  — list all video nodes
+  POST /api/cameras/probe       — re-enumerate cameras
+  POST /api/cameras/door/{id}   — set door camera
+  POST /api/cameras/yard/{id}   — set yard camera
+  GET/DELETE /api/history
+  GET/DELETE /api/users/{name}
 """
 
 import os
@@ -15,8 +21,10 @@ import base64
 import asyncio
 import logging
 import threading
+import atexit
 import cv2
 import numpy as np
+from contextlib import asynccontextmanager
 from datetime import datetime
 from pathlib import Path
 from concurrent.futures import ThreadPoolExecutor
@@ -30,20 +38,365 @@ from recognizer import (
     REGISTRATION_FRAMES_REQUIRED,
 )
 
+# ── GPIO — deteksi platform ───────────────────────────────────────────────────
+try:
+    import RPi.GPIO as GPIO
+    GPIO_AVAILABLE = True
+except ImportError:
+    GPIO_AVAILABLE = False
+    class _MockGPIO:
+        BCM = "BCM"; OUT = "OUT"; HIGH = True; LOW = False
+        def setmode(self, *a): pass
+        def setwarnings(self, *a): pass
+        def setup(self, *a, **kw): pass
+        def output(self, pin, state):
+            logging.getLogger(__name__).debug(f"[MockGPIO] pin={pin} → {state}")
+        def PWM(self, pin, freq):
+            _log = logging.getLogger(__name__)
+            class _P:
+                def start(self, dc): _log.debug(f"[MockPWM] {pin} start {dc}")
+                def ChangeDutyCycle(self, dc): _log.debug(f"[MockPWM] {pin} dc={dc}")
+                def stop(self): _log.debug(f"[MockPWM] {pin} stop")
+            return _P()
+        def cleanup(self): pass
+    GPIO = _MockGPIO()
+
+# ── Pin config ────────────────────────────────────────────────────────────────
+PIN_SERVO     = 18
+PIN_LED_HIJAU = 27
+PIN_LED_MERAH = 22
+PIN_BUZZER    = 23
+
+SERVO_FREQ  = 50
+LOCK_ANGLE  = 0
+OPEN_ANGLE  = 90
+OPEN_TIME   = 5
+
+def _angle_to_duty(angle: float) -> float:
+    return 2.5 + (angle / 18.0)
+
+_servo_pwm  = None
+_servo_lock = threading.Lock()
+
+# ── Logging ───────────────────────────────────────────────────────────────────
 logging.basicConfig(
     level=logging.INFO,
     format="%(asctime)s - %(name)s - %(levelname)s - %(message)s",
 )
 logger = logging.getLogger(__name__)
+if GPIO_AVAILABLE:
+    logger.info("✅ RPi.GPIO tersedia — mode hardware aktif")
+else:
+    logger.warning("⚠️  RPi.GPIO tidak ditemukan — mode simulasi")
 
-# ── History directory ─────────────────────────────────────────────────────────
+# ─────────────────────────────────────────────────────────────────────────────
+# GPIO / SERVO
+# ─────────────────────────────────────────────────────────────────────────────
+
+def setup_gpio() -> None:
+    global _servo_pwm
+    try:
+        GPIO.setwarnings(False)
+        GPIO.setmode(GPIO.BCM)
+        GPIO.setup(PIN_LED_HIJAU, GPIO.OUT, initial=GPIO.LOW)
+        GPIO.setup(PIN_LED_MERAH, GPIO.OUT, initial=GPIO.HIGH)
+        GPIO.setup(PIN_BUZZER,    GPIO.OUT, initial=GPIO.LOW)
+        GPIO.setup(PIN_SERVO,     GPIO.OUT)
+        lock_dc = _angle_to_duty(LOCK_ANGLE)
+        pwm = GPIO.PWM(PIN_SERVO, SERVO_FREQ)
+        pwm.start(lock_dc)
+        with _servo_lock:
+            _servo_pwm = pwm
+        logger.info(
+            f"✅ GPIO diinisialisasi — Servo=PIN{PIN_SERVO} "
+            f"({SERVO_FREQ}Hz, {LOCK_ANGLE}° dc={lock_dc:.2f} TERKUNCI), "
+            f"LED_H=PIN{PIN_LED_HIJAU}, LED_M=PIN{PIN_LED_MERAH}, Buzzer=PIN{PIN_BUZZER}"
+        )
+    except Exception as e:
+        logger.error(f"❌ Gagal inisialisasi GPIO: {e}")
+
+
+def _set_servo_angle(angle: float) -> None:
+    """Gerakkan servo lalu matikan sinyal (cegah getaran). Panggil dari thread."""
+    dc = _angle_to_duty(angle)
+    with _servo_lock:
+        if _servo_pwm is not None:
+            _servo_pwm.ChangeDutyCycle(dc)
+    time.sleep(0.5)
+    with _servo_lock:
+        if _servo_pwm is not None:
+            _servo_pwm.ChangeDutyCycle(0)
+
+
+def _beep(duration: float) -> None:
+    GPIO.output(PIN_BUZZER, GPIO.HIGH)
+    time.sleep(duration)
+    GPIO.output(PIN_BUZZER, GPIO.LOW)
+
+
+def _servo_unlock_sequence(name: str) -> None:
+    """Urutan hardware akses diterima — berjalan di background thread."""
+    logger.info(f"🔓 [SERVO] Unlock untuk: {name}")
+    try:
+        GPIO.output(PIN_LED_HIJAU, GPIO.HIGH)
+        GPIO.output(PIN_LED_MERAH, GPIO.LOW)
+        _beep(0.15); time.sleep(0.10); _beep(0.15)
+        logger.info(f"🔓 [SERVO] Servo → {OPEN_ANGLE}°")
+        _set_servo_angle(OPEN_ANGLE)
+        logger.info(f"⏳ [SERVO] Menunggu {OPEN_TIME}s…")
+        time.sleep(OPEN_TIME)
+        logger.info(f"🔒 [SERVO] Servo → {LOCK_ANGLE}°")
+        _set_servo_angle(LOCK_ANGLE)
+        GPIO.output(PIN_LED_MERAH, GPIO.HIGH)
+        GPIO.output(PIN_LED_HIJAU, GPIO.LOW)
+        logger.info(f"✅ [SERVO] Selesai untuk: {name}")
+    except Exception as e:
+        logger.error(f"❌ [SERVO] Error: {e}")
+        try:
+            _set_servo_angle(LOCK_ANGLE)
+            GPIO.output(PIN_LED_MERAH, GPIO.HIGH)
+            GPIO.output(PIN_LED_HIJAU, GPIO.LOW)
+            GPIO.output(PIN_BUZZER,    GPIO.LOW)
+        except Exception:
+            pass
+
+
+def trigger_unlock_servo(name: str) -> None:
+    """Spawn background thread untuk urutan servo — tidak memblokir event loop."""
+    t = threading.Thread(
+        target=_servo_unlock_sequence, args=(name,),
+        daemon=True, name=f"servo-unlock-{name}",
+    )
+    t.start()
+    logger.info(f"🧵 [SERVO] Thread dimulai: {t.name}")
+
+# ─────────────────────────────────────────────────────────────────────────────
+# CAMERA CONFIG
+# ─────────────────────────────────────────────────────────────────────────────
+
+STREAM_W   = 320
+STREAM_H   = 240
+CAMERA_FPS = 30
+
+_door_cam_id: int = 0   # /dev/video0 — face recognition
+_yard_cam_id: int = 2   # /dev/video2 — CCTV / monitoring
+
+# Door camera state
+_door_frame: np.ndarray | None = None
+_door_frame_ts: float = 0.0
+_door_mutex     = threading.Lock()
+_door_cap_mutex = threading.Lock()
+_door_cap: cv2.VideoCapture | None = None
+_door_running   = threading.Event()
+
+# Yard camera state
+_yard_frame: np.ndarray | None = None
+_yard_frame_ts: float = 0.0
+_yard_mutex     = threading.Lock()
+_yard_cap_mutex = threading.Lock()
+_yard_cap: cv2.VideoCapture | None = None
+_yard_running   = threading.Event()
+
+
+def _is_capture_node(video_path: str) -> bool:
+    """Cek apakah V4L2 node adalah capture node (bukan metadata)."""
+    import fcntl, struct
+    VIDIOC_QUERYCAP = 0x80685600
+    try:
+        with open(video_path, "rb") as f:
+            buf = b"\x00" * 104
+            result = fcntl.ioctl(f, VIDIOC_QUERYCAP, buf)
+            caps = struct.unpack_from("<I", result, 64)[0]
+            return bool(caps & 0x00000001)
+    except Exception:
+        return False
+
+
+def _open_cap(cam_id: int, width: int = STREAM_W, height: int = STREAM_H) -> cv2.VideoCapture | None:
+    """Buka kamera via path langsung — hindari obsensor noise dari CAP_ANY."""
+    import glob
+    video_nodes   = sorted(glob.glob("/dev/video*"))
+    matching_path = f"/dev/video{cam_id}"
+
+    if matching_path in video_nodes and _is_capture_node(matching_path):
+        candidates: list[tuple] = [(matching_path, cv2.CAP_V4L2)]
+    else:
+        candidates = [(cam_id, cv2.CAP_V4L2), (cam_id, cv2.CAP_ANY)]
+
+    for src, backend in candidates:
+        cap = cv2.VideoCapture(src, backend)
+        if not cap.isOpened():
+            cap.release(); continue
+        cap.set(cv2.CAP_PROP_FOURCC,      cv2.VideoWriter_fourcc(*"MJPG"))
+        cap.set(cv2.CAP_PROP_FRAME_WIDTH,  width)
+        cap.set(cv2.CAP_PROP_FRAME_HEIGHT, height)
+        cap.set(cv2.CAP_PROP_FPS,          CAMERA_FPS)
+        cap.set(cv2.CAP_PROP_BUFFERSIZE,   1)
+        ok = False
+        for _ in range(6):
+            ret, frame = cap.read()
+            if ret and frame is not None:
+                ok = True; break
+        if not ok:
+            cap.release(); continue
+        actual_w = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
+        actual_h = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
+        logger.info(f"✅ Camera {cam_id} ({src}) ready — {actual_w}x{actual_h} @ {CAMERA_FPS}FPS")
+        return cap
+
+    logger.error(f"❌ Cannot open camera {cam_id}")
+    return None
+
+# ── Camera threads ────────────────────────────────────────────────────────────
+
+def _door_camera_thread():
+    global _door_cap, _door_frame, _door_frame_ts
+    while True:
+        _door_running.wait()
+        with _door_cap_mutex:
+            cap = _open_cap(_door_cam_id, STREAM_W, STREAM_H)
+            _door_cap = cap
+        if cap is None:
+            logger.warning("Door camera: tidak bisa dibuka, retry 2s")
+            time.sleep(2); continue
+        logger.info("Door camera: mulai capture")
+        fails = 0
+        while _door_running.is_set():
+            ret, frame = cap.read()
+            if not ret or frame is None:
+                fails += 1
+                if fails > 10:
+                    logger.warning("Door camera: terlalu banyak gagal, reopen")
+                    break
+                time.sleep(0.01); continue
+            fails = 0
+            with _door_mutex:
+                _door_frame    = frame
+                _door_frame_ts = time.monotonic()
+        cap.release()
+        with _door_cap_mutex:
+            _door_cap = None
+        logger.info("Door camera: berhenti")
+
+
+def _yard_camera_thread():
+    global _yard_cap, _yard_frame, _yard_frame_ts
+    while True:
+        _yard_running.wait()
+        with _yard_cap_mutex:
+            cap = _open_cap(_yard_cam_id, 640, 480)
+            _yard_cap = cap
+        if cap is None:
+            logger.warning("Yard camera: tidak bisa dibuka, retry 2s")
+            time.sleep(2); continue
+        logger.info("Yard camera: mulai capture")
+        fails = 0
+        while _yard_running.is_set():
+            ret, frame = cap.read()
+            if not ret or frame is None:
+                fails += 1
+                if fails > 10:
+                    logger.warning("Yard camera: terlalu banyak gagal, reopen")
+                    break
+                time.sleep(0.01); continue
+            fails = 0
+            with _yard_mutex:
+                _yard_frame    = frame
+                _yard_frame_ts = time.monotonic()
+        cap.release()
+        with _yard_cap_mutex:
+            _yard_cap = None
+        logger.info("Yard camera: berhenti")
+
+
+threading.Thread(target=_door_camera_thread, daemon=True, name="door-cam").start()
+threading.Thread(target=_yard_camera_thread, daemon=True, name="yard-cam").start()
+
+
+def _get_door_frame() -> np.ndarray | None:
+    with _door_mutex:
+        return None if _door_frame is None else _door_frame.copy()
+
+def _get_yard_frame() -> np.ndarray | None:
+    with _yard_mutex:
+        return None if _yard_frame is None else _yard_frame.copy()
+
+def _wait_frame(get_fn, timeout: float = 3.0) -> np.ndarray | None:
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
+        f = get_fn()
+        if f is not None:
+            return f
+        time.sleep(0.01)
+    return None
+
+
+async def ensure_door_camera() -> bool:
+    _door_running.set()
+    loop  = asyncio.get_event_loop()
+    frame = await loop.run_in_executor(_thread_pool, _wait_frame, _get_door_frame, 3.0)
+    return frame is not None
+
+async def ensure_yard_camera() -> bool:
+    _yard_running.set()
+    loop  = asyncio.get_event_loop()
+    frame = await loop.run_in_executor(_thread_pool, _wait_frame, _get_yard_frame, 3.0)
+    return frame is not None
+
+# ─────────────────────────────────────────────────────────────────────────────
+# APP INIT  (lifespan didaftarkan di sini, setelah semua fungsi sudah terdefinisi)
+# ─────────────────────────────────────────────────────────────────────────────
+
+engine       = FaceRecognizerEngine()
+_thread_pool = ThreadPoolExecutor(max_workers=6)
+
 HISTORY_DIR  = Path("history")
 HISTORY_JSON = Path("history.json")
 HISTORY_DIR.mkdir(exist_ok=True)
 
-app = FastAPI(title="Smart Lock Face Recognition API")
 
-# Serve WebP snapshots as static files so frontend can load them by URL
+@asynccontextmanager
+async def lifespan(app_instance: FastAPI):
+    """Startup + shutdown handler (menggantikan @app.on_event yang deprecated)."""
+    # ── STARTUP ───────────────────────────────────────────────────────────────
+    logger.info("Server starting — pre-warming camera dan ML models…")
+    setup_gpio()
+
+    def _hardware_cleanup():
+        logger.info("🧹 Hardware cleanup (atexit)…")
+        try:
+            _set_servo_angle(LOCK_ANGLE)
+            with _servo_lock:
+                if _servo_pwm is not None:
+                    _servo_pwm.stop()
+                    logger.info("🔒 [atexit] PWM servo dihentikan")
+        except Exception as e:
+            logger.warning(f"[atexit] PWM stop error: {e}")
+        try:
+            GPIO.cleanup()
+            logger.info("🧹 [atexit] GPIO.cleanup() selesai")
+        except Exception as e:
+            logger.warning(f"[atexit] GPIO.cleanup error: {e}")
+
+    atexit.register(_hardware_cleanup)
+    logger.info("✅ Hardware cleanup terdaftar via atexit")
+
+    await ensure_door_camera()
+    await ensure_yard_camera()
+
+    loop = asyncio.get_event_loop()
+    await loop.run_in_executor(_thread_pool, lambda: engine.face_detector)
+    await loop.run_in_executor(_thread_pool, lambda: engine.face_recognizer)
+    logger.info("✅ Ready")
+
+    yield  # ← aplikasi berjalan
+
+    # ── SHUTDOWN ──────────────────────────────────────────────────────────────
+    logger.info("Server shutting down…")
+
+
+app = FastAPI(title="Smart Lock Face Recognition API", lifespan=lifespan)
+
 app.mount("/history", StaticFiles(directory=str(HISTORY_DIR)), name="history")
 
 app.add_middleware(
@@ -52,124 +405,11 @@ app.add_middleware(
         "http://127.0.0.1:8000",
         "http://localhost:8000",
     ],
-    allow_origin_regex=r"http://192\.168\.\d+\.\d+(:\d+)?",
+    allow_origin_regex=r"http://172\.20\.10\.\d+(:\d+)?",
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
 )
-
-engine = FaceRecognizerEngine()
-
-# ── Thread pool ────────────────────────────────────────────────────────────────
-_thread_pool = ThreadPoolExecutor(max_workers=4)
-
-# ─────────────────────────────────────────────────────────────────────────────
-# DEDICATED CAMERA THREAD
-# ─────────────────────────────────────────────────────────────────────────────
-
-STREAM_W   = 320
-STREAM_H   = 240
-CAMERA_FPS = 30
-
-_latest_frame: np.ndarray | None = None
-_latest_frame_ts: float = 0.0
-_frame_mutex   = threading.Lock()
-_cap_mutex     = threading.Lock()
-_cap: cv2.VideoCapture | None = None
-_current_cam_id: int = 0
-_camera_running = threading.Event()
-
-
-def _open_cap(cam_id: int) -> cv2.VideoCapture | None:
-    for backend in [cv2.CAP_V4L2, cv2.CAP_ANY]:
-        cap = cv2.VideoCapture(cam_id, backend)
-        if not cap.isOpened():
-            cap.release()
-            continue
-        cap.set(cv2.CAP_PROP_FOURCC, cv2.VideoWriter_fourcc(*"MJPG"))
-        cap.set(cv2.CAP_PROP_FRAME_WIDTH,  STREAM_W)
-        cap.set(cv2.CAP_PROP_FRAME_HEIGHT, STREAM_H)
-        cap.set(cv2.CAP_PROP_FPS, CAMERA_FPS)
-        cap.set(cv2.CAP_PROP_BUFFERSIZE, 1)
-        ok = False
-        for _ in range(6):
-            ret, frame = cap.read()
-            if ret and frame is not None:
-                ok = True
-                break
-        if not ok:
-            cap.release()
-            continue
-        actual_w = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
-        actual_h = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
-        logger.info(f"✅ Camera {cam_id} ready — {actual_w}x{actual_h} @ {CAMERA_FPS}FPS")
-        return cap
-    logger.error(f"❌ Cannot open camera {cam_id}")
-    return None
-
-
-def _camera_thread_fn():
-    global _cap, _latest_frame, _latest_frame_ts
-    while True:
-        _camera_running.wait()
-        with _cap_mutex:
-            cap = _open_cap(_current_cam_id)
-            _cap = cap
-        if cap is None:
-            logger.warning("Camera thread: could not open camera, retrying in 2 s")
-            time.sleep(2)
-            continue
-        logger.info("Camera thread: started capturing")
-        consecutive_fail = 0
-        while _camera_running.is_set():
-            ret, frame = cap.read()
-            if not ret or frame is None:
-                consecutive_fail += 1
-                if consecutive_fail > 10:
-                    logger.warning("Camera thread: too many failures, reopening")
-                    break
-                time.sleep(0.01)
-                continue
-            consecutive_fail = 0
-            with _frame_mutex:
-                _latest_frame    = frame
-                _latest_frame_ts = time.monotonic()
-        cap.release()
-        with _cap_mutex:
-            _cap = None
-        logger.info("Camera thread: stopped")
-
-
-_cam_thread = threading.Thread(target=_camera_thread_fn, daemon=True)
-_cam_thread.start()
-
-
-def _get_latest_frame() -> np.ndarray | None:
-    with _frame_mutex:
-        return None if _latest_frame is None else _latest_frame.copy()
-
-
-def _wait_for_frame(timeout: float = 3.0) -> np.ndarray | None:
-    deadline = time.monotonic() + timeout
-    while time.monotonic() < deadline:
-        f = _get_latest_frame()
-        if f is not None:
-            return f
-        time.sleep(0.01)
-    return None
-
-
-async def ensure_camera() -> bool:
-    _camera_running.set()
-    loop = asyncio.get_event_loop()
-    frame = await loop.run_in_executor(_thread_pool, _wait_for_frame, 3.0)
-    return frame is not None
-
-
-async def release_camera_async():
-    _camera_running.clear()
-    await asyncio.sleep(0.2)
-
 
 # ─────────────────────────────────────────────────────────────────────────────
 # ENCODE HELPERS
@@ -186,34 +426,25 @@ def _encode_jpeg(frame: np.ndarray, quality: int = 50) -> str:
 
 
 # ─────────────────────────────────────────────────────────────────────────────
-# HISTORY  (saved on the Pi, served as static files)
+# HISTORY
 # ─────────────────────────────────────────────────────────────────────────────
 
 _history_lock = threading.Lock()
 
 
 def _save_history_entry(name: str, frame: np.ndarray, percentage: float) -> dict:
-    """
-    Save a WebP snapshot and append an entry to history.json.
-    Returns the new entry dict.
-    """
-    ts_iso  = datetime.now().isoformat(timespec="seconds")
-    ts_safe = ts_iso.replace(":", "-")
+    ts_iso   = datetime.now().isoformat(timespec="seconds")
+    ts_safe  = ts_iso.replace(":", "-")
     filename = f"{ts_safe}_{name.replace(' ', '_')}.webp"
     filepath = HISTORY_DIR / filename
-
-    # Upscale tiny stream frame to a more usable resolution before saving
     save_frame = cv2.resize(frame, (640, 480), interpolation=cv2.INTER_LINEAR)
-    cv2.imwrite(str(filepath), save_frame,
-                [cv2.IMWRITE_WEBP_QUALITY, 85])
-
+    cv2.imwrite(str(filepath), save_frame, [cv2.IMWRITE_WEBP_QUALITY, 85])
     entry = {
         "name":       name,
         "timestamp":  ts_iso,
         "percentage": round(float(percentage), 1),
         "image":      filename,
     }
-
     with _history_lock:
         records: list = []
         if HISTORY_JSON.exists():
@@ -221,10 +452,9 @@ def _save_history_entry(name: str, frame: np.ndarray, percentage: float) -> dict
                 records = json.loads(HISTORY_JSON.read_text())
             except Exception:
                 records = []
-        records.insert(0, entry)          # newest first
-        records = records[:200]           # keep at most 200 entries
+        records.insert(0, entry)
+        records = records[:200]
         HISTORY_JSON.write_text(json.dumps(records, indent=2))
-
     logger.info(f"📸 History saved: {filename}")
     return entry
 
@@ -238,29 +468,16 @@ def _load_history() -> list:
         except Exception:
             return []
 
-
 # ─────────────────────────────────────────────────────────────────────────────
-# RECOGNITION WORKER  (one-shot: stops after first confirmed match)
+# RECOGNITION WORKER
 # ─────────────────────────────────────────────────────────────────────────────
 
 async def _recognition_worker(
     result_queue: asyncio.Queue,
     stop_event:   asyncio.Event,
-    unlock_event: asyncio.Event,   # set when a match is confirmed
+    unlock_event: asyncio.Event,
 ):
-    """
-    Runs detection+recognition continuously.
-
-    State machine
-    -------------
-    SCANNING  →  face detected, recognised, similarity ≥ MATCH_THRESHOLD
-              →  save history, set unlock_event, push 'unlocked_final', stop.
-
-    'result' messages are pushed continuously for the live bbox/FPS display.
-    Once unlock_event is set the worker exits — the frame sender keeps streaming
-    for a few more seconds so the front-end can show the ACCESS GRANTED animation.
-    """
-    loop = asyncio.get_event_loop()
+    loop      = asyncio.get_event_loop()
     skip_next = False
 
     while not stop_event.is_set() and not unlock_event.is_set():
@@ -269,7 +486,7 @@ async def _recognition_worker(
             skip_next = False
             continue
 
-        frame = _get_latest_frame()
+        frame = _get_door_frame()
         if frame is None:
             await asyncio.sleep(0.05)
             continue
@@ -311,22 +528,18 @@ async def _recognition_worker(
             "process_time_ms": round(elapsed_ms, 2),
             "unlocked":        matched,
         }
-
         try:
             result_queue.put_nowait(result)
         except asyncio.QueueFull:
             pass
 
-        # ── ONE-SHOT UNLOCK ──────────────────────────────────────────────────
         if matched:
             unlock_event.set()
+            trigger_unlock_servo(match_name)
 
-            # Save history snapshot off-loop
             entry = await loop.run_in_executor(
                 _thread_pool, _save_history_entry, match_name, frame, match_percentage
             )
-
-            # Send the definitive unlock message
             final_msg = {
                 "type":       "unlocked_final",
                 "name":       match_name,
@@ -337,7 +550,6 @@ async def _recognition_worker(
             try:
                 result_queue.put_nowait(final_msg)
             except asyncio.QueueFull:
-                # Drain one old result to make room
                 try:
                     result_queue.get_nowait()
                     result_queue.put_nowait(final_msg)
@@ -345,62 +557,85 @@ async def _recognition_worker(
                     pass
 
             logger.info(f"🔓 Access granted: {match_name} ({match_percentage:.1f}%)")
-            return   # worker exits; frame sender keeps running
+            return
 
         if elapsed_ms > 200:
             skip_next = True
         else:
             await asyncio.sleep(0.01)
 
-
 # ─────────────────────────────────────────────────────────────────────────────
-# CAMERA MANAGEMENT REST API
+# CAMERA MANAGEMENT API
 # ─────────────────────────────────────────────────────────────────────────────
 
 def _list_cameras_sync() -> list:
     import glob
-    nodes = sorted(glob.glob("/dev/video*")) or [str(i) for i in range(4)]
-    available = []
-    for node in nodes:
+    result = []
+    for node in sorted(glob.glob("/dev/video*")):
         try:
-            idx = int(node.replace("/dev/video", "")) if "/" in node else int(node)
+            idx = int(node.replace("/dev/video", ""))
         except ValueError:
             continue
-        cap = cv2.VideoCapture(idx, cv2.CAP_V4L2)
-        if not cap.isOpened():
-            cap.release()
-            continue
-        ret, _ = cap.read()
-        if ret:
-            available.append({
-                "id":         idx,
-                "name":       f"USB Camera {idx}",
-                "resolution": (
-                    f"{int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))}"
-                    f"x{int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))}"
-                ),
-            })
-        cap.release()
-    return available
+        avail = _is_capture_node(node)
+        entry = {"id": idx, "node": node, "name": f"USB Camera {idx}",
+                 "available": avail, "resolution": "—"}
+        if avail:
+            cap = cv2.VideoCapture(node, cv2.CAP_V4L2)
+            if cap.isOpened():
+                ret, _ = cap.read()
+                if ret:
+                    entry["resolution"] = (
+                        f"{int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))}"
+                        f"x{int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))}"
+                    )
+                cap.release()
+            else:
+                entry["available"] = False
+        result.append(entry)
+    return result
 
 
 @app.get("/api/cameras")
 async def list_cameras():
-    loop = asyncio.get_event_loop()
-    cameras = await loop.run_in_executor(_thread_pool, _list_cameras_sync)
-    return {"cameras": cameras, "current": _current_cam_id}
+    cameras = await asyncio.get_event_loop().run_in_executor(_thread_pool, _list_cameras_sync)
+    return {"cameras": cameras, "door_cam_id": _door_cam_id, "yard_cam_id": _yard_cam_id}
+
+
+@app.post("/api/cameras/probe")
+async def probe_cameras():
+    cameras = await asyncio.get_event_loop().run_in_executor(_thread_pool, _list_cameras_sync)
+    return {"cameras": cameras, "door_cam_id": _door_cam_id, "yard_cam_id": _yard_cam_id}
+
+
+@app.post("/api/cameras/door/{camera_id}")
+async def select_door_camera(camera_id: int):
+    global _door_cam_id
+    _door_running.clear()
+    await asyncio.sleep(0.3)
+    _door_cam_id = camera_id
+    alive = await ensure_door_camera()
+    if not alive:
+        return {"status": "error", "message": f"Kamera {camera_id} tidak bisa dibuka", "alive": False}
+    return {"status": "success", "message": f"Kamera pintu → /dev/video{camera_id}",
+            "camera_id": camera_id, "alive": True}
+
+
+@app.post("/api/cameras/yard/{camera_id}")
+async def select_yard_camera(camera_id: int):
+    global _yard_cam_id
+    _yard_running.clear()
+    await asyncio.sleep(0.3)
+    _yard_cam_id = camera_id
+    alive = await ensure_yard_camera()
+    if not alive:
+        return {"status": "error", "message": f"Kamera {camera_id} tidak bisa dibuka", "alive": False}
+    return {"status": "success", "message": f"Kamera CCTV → /dev/video{camera_id}",
+            "camera_id": camera_id, "alive": True}
 
 
 @app.post("/api/cameras/select/{camera_id}")
-async def select_camera(camera_id: int):
-    global _current_cam_id
-    await release_camera_async()
-    _current_cam_id = camera_id
-    ready = await ensure_camera()
-    if not ready:
-        return {"status": "error", "message": f"Failed to open camera {camera_id}"}
-    return {"status": "success", "message": f"Camera {camera_id} selected",
-            "camera_id": camera_id}
+async def select_camera_legacy(camera_id: int):
+    return await select_door_camera(camera_id)
 
 
 @app.get("/api/users")
@@ -418,14 +653,12 @@ async def delete_user(name: str):
 
 @app.get("/api/history")
 async def get_history(limit: int = 50):
-    """Return the last N access history entries."""
     entries = _load_history()
     return {"history": entries[:limit], "total": len(entries)}
 
 
 @app.delete("/api/history")
 async def clear_history():
-    """Delete all history entries and image files."""
     with _history_lock:
         if HISTORY_JSON.exists():
             HISTORY_JSON.unlink()
@@ -433,9 +666,8 @@ async def clear_history():
             f.unlink(missing_ok=True)
     return {"status": "success", "message": "History cleared"}
 
-
 # ─────────────────────────────────────────────────────────────────────────────
-# RECOGNITION WEBSOCKET
+# WEBSOCKET — Face Recognition  (/ws)
 # ─────────────────────────────────────────────────────────────────────────────
 
 @app.websocket("/ws")
@@ -443,58 +675,45 @@ async def websocket_recognition(websocket: WebSocket):
     await websocket.accept()
     logger.info("Recognition WS connected")
 
-    ready = await ensure_camera()
-    if not ready:
-        await websocket.send_json({"type": "error",
-                                   "message": "Camera not available on server"})
-        await websocket.close()
-        return
+    if not await ensure_door_camera():
+        await websocket.send_json({"type": "error", "message": "Kamera pintu tidak tersedia"})
+        await websocket.close(); return
 
-    loop        = asyncio.get_event_loop()
-    stop_event  = asyncio.Event()
+    loop         = asyncio.get_event_loop()
+    stop_event   = asyncio.Event()
     unlock_event = asyncio.Event()
     result_queue: asyncio.Queue = asyncio.Queue(maxsize=4)
 
-    # ── Frame sender ──────────────────────────────────────────────────────────
     async def frame_sender():
-        FRAME_INTERVAL = 1 / 20   # 20 FPS cap
-        last_ts = 0.0
+        INTERVAL = 1 / 20
+        last = 0.0
         while not stop_event.is_set():
             try:
                 now = time.monotonic()
-                if now - last_ts < FRAME_INTERVAL:
-                    await asyncio.sleep(0.005)
-                    continue
-                frame = _get_latest_frame()
+                if now - last < INTERVAL:
+                    await asyncio.sleep(0.005); continue
+                frame = _get_door_frame()
                 if frame is None:
-                    await asyncio.sleep(0.02)
-                    continue
+                    await asyncio.sleep(0.02); continue
                 b64 = await loop.run_in_executor(_thread_pool, _encode_jpeg, frame, 50)
                 await websocket.send_json({"type": "frame", "image": b64})
-                last_ts = time.monotonic()
+                last = time.monotonic()
             except Exception as e:
-                logger.error(f"frame_sender error: {e}")
-                break
+                logger.error(f"door frame_sender: {e}"); break
 
-    # ── Result sender ─────────────────────────────────────────────────────────
     async def result_sender():
         while not stop_event.is_set():
             try:
                 result = await asyncio.wait_for(result_queue.get(), timeout=1.0)
                 await websocket.send_json(result)
-
-                # After final unlock message, keep camera alive briefly then stop
                 if result.get("type") == "unlocked_final":
-                    await asyncio.sleep(3.0)   # show ACCESS GRANTED for 3 s
-                    stop_event.set()
-                    break
+                    await asyncio.sleep(3.0)
+                    stop_event.set(); break
             except asyncio.TimeoutError:
                 continue
             except Exception as e:
-                logger.error(f"result_sender error: {e}")
-                break
+                logger.error(f"result_sender: {e}"); break
 
-    # ── Keepalive ─────────────────────────────────────────────────────────────
     async def keepalive():
         while not stop_event.is_set():
             await asyncio.sleep(10)
@@ -507,18 +726,14 @@ async def websocket_recognition(websocket: WebSocket):
         asyncio.create_task(frame_sender()),
         asyncio.create_task(result_sender()),
         asyncio.create_task(keepalive()),
-        asyncio.create_task(
-            _recognition_worker(result_queue, stop_event, unlock_event)
-        ),
+        asyncio.create_task(_recognition_worker(result_queue, stop_event, unlock_event)),
     ]
-
     try:
         while not stop_event.is_set():
             try:
                 msg = await asyncio.wait_for(websocket.receive_json(), timeout=1.0)
                 if msg.get("type") == "pong":
                     continue
-                # "restart" message — browser re-opens the WS for a new scan attempt
             except asyncio.TimeoutError:
                 continue
     except WebSocketDisconnect:
@@ -530,9 +745,8 @@ async def websocket_recognition(websocket: WebSocket):
         for t in tasks:
             t.cancel()
 
-
 # ─────────────────────────────────────────────────────────────────────────────
-# ENROLLMENT WEBSOCKET
+# WEBSOCKET — Enrollment  (/ws/enroll)
 # ─────────────────────────────────────────────────────────────────────────────
 
 @app.websocket("/ws/enroll")
@@ -540,40 +754,32 @@ async def websocket_enrollment(websocket: WebSocket):
     await websocket.accept()
     logger.info("Enrollment WS connected")
 
-    ready = await ensure_camera()
-    if not ready:
-        await websocket.send_json({"type": "error",
-                                   "message": "Camera not available on server"})
-        await websocket.close()
-        return
+    if not await ensure_door_camera():
+        await websocket.send_json({"type": "error", "message": "Kamera pintu tidak tersedia"})
+        await websocket.close(); return
 
-    loop       = asyncio.get_event_loop()
-    stop_event = asyncio.Event()
-
-    reg_name:       str  = ""
+    loop           = asyncio.get_event_loop()
+    stop_event     = asyncio.Event()
+    reg_name       = ""
     reg_embeddings: list = []
-    is_scanning:    bool = False
+    is_scanning    = False
 
-    # ── Frame sender ──────────────────────────────────────────────────────────
     async def frame_sender():
-        FRAME_INTERVAL = 1 / 15   # 15 FPS for enrollment preview
-        last_ts = 0.0
+        INTERVAL = 1 / 15
+        last = 0.0
         while not stop_event.is_set():
             try:
                 now = time.monotonic()
-                if now - last_ts < FRAME_INTERVAL:
-                    await asyncio.sleep(0.005)
-                    continue
-                frame = _get_latest_frame()
+                if now - last < INTERVAL:
+                    await asyncio.sleep(0.005); continue
+                frame = _get_door_frame()
                 if frame is None:
-                    await asyncio.sleep(0.02)
-                    continue
+                    await asyncio.sleep(0.02); continue
                 b64 = await loop.run_in_executor(_thread_pool, _encode_jpeg, frame, 55)
                 await websocket.send_json({"type": "frame", "image": b64})
-                last_ts = time.monotonic()
+                last = time.monotonic()
             except Exception as e:
-                logger.error(f"Enroll frame_sender error: {e}")
-                break
+                logger.error(f"enroll frame_sender: {e}"); break
 
     frame_task = asyncio.create_task(frame_sender())
 
@@ -586,134 +792,175 @@ async def websocket_enrollment(websocket: WebSocket):
                 reg_name = data.get("name", "").strip()
                 if not reg_name:
                     await websocket.send_json({"type": "register_error",
-                                               "message": "Name cannot be empty."})
-                    continue
-                is_scanning    = True
-                reg_embeddings = []
-                await websocket.send_json({
-                    "type":    "status",
-                    "message": f"Scanning '{reg_name}'… look straight at the camera.",
-                })
+                                               "message": "Name cannot be empty."}); continue
+                is_scanning = True; reg_embeddings = []
+                await websocket.send_json({"type": "status",
+                                           "message": f"Scanning '{reg_name}'… look at the camera."})
 
             elif msg_type == "register_cancel":
-                is_scanning    = False
-                reg_embeddings = []
-                await websocket.send_json({"type": "status",
-                                           "message": "Registration cancelled."})
+                is_scanning = False; reg_embeddings = []
+                await websocket.send_json({"type": "status", "message": "Registration cancelled."})
 
             elif msg_type == "scan":
-                # Client polls for detection result on the latest camera frame
-                frame = _get_latest_frame()
-                if frame is None:
-                    continue
+                frame = _get_door_frame()
+                if frame is None: continue
 
                 face_info, bbox, face_count, quality = await loop.run_in_executor(
                     _thread_pool, engine.extract_face_landmarks_and_box, frame
                 )
-                await websocket.send_json({
-                    "type":        "preview",
-                    "bbox":        bbox,
-                    "face_count":  face_count,
-                    "quality_issue": quality,
-                })
+                await websocket.send_json({"type": "preview", "bbox": bbox,
+                                           "face_count": face_count, "quality_issue": quality})
 
-                # Guidance messages even when not scanning
+                warn_map = {
+                    "multiple_faces": "Multiple faces — one person only.",
+                    "too_small":      "Move closer.",
+                    "too_close":      "Move back a bit.",
+                }
                 if face_info is None and is_scanning:
-                    warn_map = {
-                        "multiple_faces": "Multiple faces detected — one person only.",
-                        "too_small":      "Move closer to the camera.",
-                        "too_close":      "Too close — move back a bit.",
-                    }
                     msg = warn_map.get(quality, "No face detected — look at the camera.")
-                    await websocket.send_json({"type": "warn", "message": msg})
-                    continue
-
-                if not is_scanning or face_info is None:
-                    continue
-
-                # Quality gates while scanning
-                if quality in ("multiple_faces", "too_small", "too_close"):
-                    warn_map = {
-                        "multiple_faces": "Multiple faces — one person only.",
-                        "too_small":      "Move closer.",
-                        "too_close":      "Move back a bit.",
-                    }
+                    await websocket.send_json({"type": "warn", "message": msg}); continue
+                if not is_scanning or face_info is None: continue
+                if quality in warn_map:
                     await websocket.send_json({"type": "warn",
-                                               "message": warn_map[quality]})
-                    continue
+                                               "message": warn_map[quality]}); continue
 
                 embedding = await loop.run_in_executor(
                     _thread_pool, engine.get_embedding, frame, face_info
                 )
-                if embedding is None:
-                    continue
-
+                if embedding is None: continue
                 reg_embeddings.append(embedding)
                 progress = int(len(reg_embeddings) * 100 / REGISTRATION_FRAMES_REQUIRED)
                 await websocket.send_json({
-                    "type":     "register_progress",
-                    "progress": progress,
-                    "count":    len(reg_embeddings),
-                    "total":    REGISTRATION_FRAMES_REQUIRED,
-                    "message":  f"Capturing biometric data… {progress}%",
+                    "type": "register_progress", "progress": progress,
+                    "count": len(reg_embeddings), "total": REGISTRATION_FRAMES_REQUIRED,
+                    "message": f"Capturing biometric data… {progress}%",
                 })
 
                 if len(reg_embeddings) >= REGISTRATION_FRAMES_REQUIRED:
                     mean_emb = np.mean(reg_embeddings, axis=0).reshape(1, -1)
                     success, reason = engine.register_user(reg_name, mean_emb)
-                    is_scanning    = False
-                    reg_embeddings = []
-
+                    is_scanning = False; reg_embeddings = []
                     if success:
-                        await websocket.send_json({"type": "register_success",
-                                                   "name": reg_name})
+                        await websocket.send_json({"type": "register_success", "name": reg_name})
                     elif reason == "name_taken":
-                        await websocket.send_json({
-                            "type":    "register_error",
-                            "message": f"Nama '{reg_name}' sudah terdaftar. "
-                                       f"Hapus akun tersebut dulu jika ingin mendaftar ulang.",
-                        })
+                        await websocket.send_json({"type": "register_error",
+                            "message": f"Nama '{reg_name}' sudah terdaftar."})
                     elif reason.startswith("face_exists:"):
-                        existing = reason.split(":", 1)[1]
-                        await websocket.send_json({
-                            "type":    "register_error",
-                            "message": f"Wajah ini sudah terdaftar sebagai '{existing}'. "
-                                       f"1 wajah hanya boleh untuk 1 akun.",
-                        })
+                        await websocket.send_json({"type": "register_error",
+                            "message": f"Wajah sudah terdaftar sebagai '{reason.split(':',1)[1]}'."})
                     elif reason.startswith("duplicate:"):
-                        dup_name = reason.split(":", 1)[1]
-                        await websocket.send_json({
-                            "type":    "register_error",
-                            "message": f"Wajah terlalu mirip dengan profil '{dup_name}'.",
-                        })
+                        await websocket.send_json({"type": "register_error",
+                            "message": f"Wajah terlalu mirip dengan '{reason.split(':',1)[1]}'."})
                     else:
-                        await websocket.send_json({
-                            "type":    "register_error",
-                            "message": f"Pendaftaran gagal ({reason}).",
-                        })
+                        await websocket.send_json({"type": "register_error",
+                            "message": f"Pendaftaran gagal ({reason})."})
 
     except WebSocketDisconnect:
         logger.info("Enrollment WS disconnected")
     except Exception as e:
         logger.error(f"Enrollment WS error: {e}", exc_info=True)
     finally:
+        stop_event.set(); frame_task.cancel()
+
+# ─────────────────────────────────────────────────────────────────────────────
+# WEBSOCKET — Motion Detection CCTV  (/ws/motion)
+# ─────────────────────────────────────────────────────────────────────────────
+
+@app.websocket("/ws/motion")
+async def websocket_motion(websocket: WebSocket):
+    await websocket.accept()
+    logger.info("Motion WS connected")
+
+    if not await ensure_yard_camera():
+        await websocket.send_json({"type": "error", "message": "Kamera CCTV tidak tersedia"})
+        await websocket.close(); return
+
+    loop       = asyncio.get_event_loop()
+    stop_event = asyncio.Event()
+
+    MOTION_THRESHOLD = 0.02   # 2% pixel berubah = ada gerakan
+    prev_gray: np.ndarray | None = None
+
+    def _detect_motion(frame: np.ndarray):
+        nonlocal prev_gray
+        gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
+        gray = cv2.GaussianBlur(gray, (11, 11), 0)
+        if prev_gray is None:
+            prev_gray = gray
+            return False, 0.0, frame
+        diff  = cv2.absdiff(prev_gray, gray)
+        prev_gray = gray
+        _, thresh = cv2.threshold(diff, 25, 255, cv2.THRESH_BINARY)
+        ratio = float(np.count_nonzero(thresh)) / thresh.size
+        annotated = frame.copy()
+        if ratio >= MOTION_THRESHOLD:
+            contours, _ = cv2.findContours(thresh, cv2.RETR_EXTERNAL,
+                                           cv2.CHAIN_APPROX_SIMPLE)
+            for cnt in contours:
+                if cv2.contourArea(cnt) < 500:
+                    continue
+                x, y, w, h = cv2.boundingRect(cnt)
+                cv2.rectangle(annotated, (x, y), (x + w, y + h), (0, 0, 255), 2)
+        return ratio >= MOTION_THRESHOLD, ratio, annotated
+
+    async def motion_sender():
+        INTERVAL = 1 / 15
+        last = 0.0
+        while not stop_event.is_set():
+            try:
+                now = time.monotonic()
+                if now - last < INTERVAL:
+                    await asyncio.sleep(0.005); continue
+                frame = _get_yard_frame()
+                if frame is None:
+                    await asyncio.sleep(0.02); continue
+                motion, ratio, annotated = await loop.run_in_executor(
+                    _thread_pool, _detect_motion, frame
+                )
+                b64 = await loop.run_in_executor(_thread_pool, _encode_jpeg, annotated, 55)
+                await websocket.send_json({
+                    "type":         "frame",
+                    "image":        b64,
+                    "motion":       motion,
+                    "motion_ratio": round(ratio * 100, 2),
+                })
+                last = time.monotonic()
+            except Exception as e:
+                logger.error(f"motion_sender: {e}"); break
+
+    async def keepalive():
+        while not stop_event.is_set():
+            await asyncio.sleep(10)
+            try:
+                await websocket.send_json({"type": "ping"})
+            except Exception:
+                break
+
+    tasks = [
+        asyncio.create_task(motion_sender()),
+        asyncio.create_task(keepalive()),
+    ]
+    try:
+        while not stop_event.is_set():
+            try:
+                msg = await asyncio.wait_for(websocket.receive_json(), timeout=1.0)
+                if msg.get("type") == "pong":
+                    continue
+            except asyncio.TimeoutError:
+                continue
+    except WebSocketDisconnect:
+        logger.info("Motion WS disconnected")
+    except Exception as e:
+        logger.error(f"Motion WS error: {e}", exc_info=True)
+    finally:
         stop_event.set()
-        frame_task.cancel()
+        for t in tasks:
+            t.cancel()
 
 
 # ─────────────────────────────────────────────────────────────────────────────
-# STARTUP
+# ENTRYPOINT
 # ─────────────────────────────────────────────────────────────────────────────
-
-@app.on_event("startup")
-async def startup_event():
-    logger.info("Server starting — pre-warming camera and ML models…")
-    await ensure_camera()
-    loop = asyncio.get_event_loop()
-    await loop.run_in_executor(_thread_pool, lambda: engine.face_detector)
-    await loop.run_in_executor(_thread_pool, lambda: engine.face_recognizer)
-    logger.info("✅ Ready")
-
 
 if __name__ == "__main__":
     print("=" * 55)

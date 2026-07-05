@@ -9,210 +9,433 @@
 
 @push('styles')
 <style>
-    .panel { background: #1f2937; border-radius: 0.5rem; padding: 1rem; }
-    .panel-header { display: flex; align-items: center; justify-content: space-between; flex-wrap: wrap; gap: 0.5rem; margin-bottom: 0.75rem; }
-    .panel-title { font-weight: 600; font-size: 0.95rem; display: flex; align-items: center; gap: 0.4rem; }
-    .cam-feed {
-        position: relative; background: #0d1117; border-radius: 0.5rem;
-        overflow: hidden; aspect-ratio: 4/3; min-height: 220px;
-    }
-    .cam-feed canvas { position: absolute; inset: 0; width: 100%; height: 100%; }
-    .badge-alert { position: absolute; top: 8px; right: 8px; z-index: 10; }
-    .lock-bar { position: absolute; bottom: 12px; left: 50%; transform: translateX(-50%); z-index: 10; }
-    #motion-flash {
-        position: absolute; inset: 0; pointer-events: none; z-index: 15;
-        border: 4px solid transparent; transition: border-color 0.1s;
-    }
-    #motion-flash.active { border-color: #ef4444; box-shadow: inset 0 0 40px rgba(239,68,68,0.4); }
-    #unlock-overlay, #camera-off-overlay {
-        position: absolute; inset: 0; display: flex; flex-direction: column;
-        align-items: center; justify-content: center; z-index: 20;
-        pointer-events: none; opacity: 0; transition: opacity 0.4s;
-        background: rgba(0,0,0,0.55); backdrop-filter: blur(4px);
-    }
-    #unlock-overlay.show, #camera-off-overlay.show { opacity: 1; pointer-events: auto; }
-    .check-icon { font-size: 4rem; color: #22c55e; }
-    .stats-row { display: flex; flex-wrap: wrap; gap: 0.5rem; margin-top: 0.75rem; font-size: 0.75rem; color: #9ca3af; }
-    .stat-chip { background: rgba(255,255,255,0.05); padding: 0.25rem 0.6rem; border-radius: 0.375rem; }
-    .stat-chip .val { font-weight: 600; color: #e5e7eb; }
-    .fps-high { color: #22c55e; } .fps-mid { color: #f59e0b; } .fps-low { color: #ef4444; }
-    .btn-sm { padding: 0.4rem 0.75rem; border-radius: 0.375rem; font-size: 0.8rem; cursor: pointer; border: none; transition: background .15s; }
-    .btn-blue  { background: #2563eb; color: #fff; } .btn-blue:hover  { background: #1d4ed8; }
-    .btn-green { background: #16a34a; color: #fff; } .btn-green:hover { background: #15803d; }
-    .btn-red   { background: #dc2626; color: #fff; } .btn-red:hover   { background: #b91c1c; }
-    .btn-gray  { background: #374151; color: #fff; } .btn-gray:hover  { background: #4b5563; }
-    .log-panel { background: #111827; border-radius: 0.5rem; padding: 0.75rem; max-height: 280px; overflow-y: auto; }
-    .log-panel h3 { font-size: 0.85rem; font-weight: 600; margin-bottom: 0.5rem; color: #d1d5db; }
-    .history-card, .motion-card {
-        display: flex; align-items: center; gap: 0.75rem;
-        padding: 0.5rem 0.75rem; background: #1f2937; border-radius: 0.375rem;
-        margin-bottom: 0.4rem; border-left: 3px solid #374151;
-    }
-    .history-card img { width: 48px; height: 36px; object-fit: cover; border-radius: 0.25rem; }
-    .motion-card.alert { border-left-color: #ef4444; background: rgba(127,29,29,0.2); }
-    .conn-bar { display: flex; align-items: center; gap: 1rem; font-size: 0.75rem; margin-bottom: 1rem; color: #9ca3af; }
-    .grid-main { display: grid; grid-template-columns: 1fr 320px; gap: 1rem; }
-    @media (max-width: 1024px) { .grid-main { grid-template-columns: 1fr; } }
-    /* cam-select */
-    .cam-select {
-        background: #374151; border: 1px solid #4b5563; color: #fff;
-        padding: 0.3rem 0.6rem; border-radius: 0.375rem; font-size: 0.75rem;
-        min-width: 200px; max-width: 320px;
-    }
-    .cam-select:disabled { opacity: .5; cursor: not-allowed; }
-    option:disabled { color: #6b7280; }
+/* ── Page layout ── */
+.recog-wrap { display: flex; flex-direction: column; gap: 1rem; }
+
+/* ── Connection pill bar ── */
+.conn-bar {
+    display: flex; align-items: center; gap: 0.75rem;
+    padding: 0.45rem 1rem;
+    background: rgba(8, 18, 36, 0.72);
+    backdrop-filter: blur(20px) saturate(1.3);
+    -webkit-backdrop-filter: blur(20px) saturate(1.3);
+    border: 1px solid rgba(255,255,255,0.08);
+    border-radius: 999px;
+    width: fit-content;
+    font-size: 0.72rem;
+    color: #94a3b8;
+    position: relative;
+    z-index: 1;
+    box-shadow: 0 2px 12px rgba(0,0,0,0.25), inset 0 1px 0 rgba(255,255,255,0.05);
+}
+html:not(.dark) .conn-bar {
+    background: rgba(210, 222, 240, 0.75);
+    border-color: rgba(148,163,184,0.25);
+    color: #4a5568;
+    box-shadow: 0 2px 8px rgba(15,23,42,0.10), inset 0 1px 0 rgba(255,255,255,0.5);
+}
+.conn-bar .sep { width: 1px; height: 12px; background: rgba(148,163,184,0.2); }
+.conn-bar .backend-label { margin-left: auto; color: #475569; font-size: 0.68rem; }
+html:not(.dark) .conn-bar .backend-label { color: #94a3b8; }
+
+/* ── Glass card ── */
+.g-card {
+    position: relative;
+    background: rgba(12, 24, 45, 0.68);
+    backdrop-filter: blur(24px) saturate(1.4);
+    -webkit-backdrop-filter: blur(24px) saturate(1.4);
+    border: 1px solid rgba(255,255,255,0.09);
+    border-radius: 16px;
+    padding: 1rem;
+    overflow: hidden;
+    box-shadow: 0 8px 32px rgba(0,0,0,0.28), inset 0 1px 0 rgba(255,255,255,0.06);
+}
+html:not(.dark) .g-card {
+    background: rgba(210, 222, 240, 0.68);
+    border-color: rgba(148,163,184,0.24);
+    box-shadow: 0 4px 20px rgba(15,23,42,0.10), inset 0 1px 0 rgba(255,255,255,0.55);
+}
+
+/* ── Card header ── */
+.g-card-header {
+    display: flex; align-items: center; justify-content: space-between;
+    flex-wrap: wrap; gap: 0.5rem; margin-bottom: 0.875rem;
+}
+.g-card-title {
+    font-weight: 600; font-size: 0.875rem;
+    display: flex; align-items: center; gap: 0.4rem;
+    color: #f1f5f9;
+}
+html:not(.dark) .g-card-title { color: #0f172a; }
+
+/* ── Status badge ── */
+.status-badge {
+    display: inline-flex; align-items: center; gap: 0.3rem;
+    padding: 0.25rem 0.65rem;
+    border-radius: 999px;
+    font-size: 0.7rem; font-weight: 500;
+    border: 1px solid transparent;
+}
+.status-badge.yellow { background: rgba(234,179,8,0.15); border-color: rgba(234,179,8,0.3); color: #fde047; }
+.status-badge.green  { background: rgba(16,185,129,0.15); border-color: rgba(16,185,129,0.3); color: #6ee7b7; }
+.status-badge.red    { background: rgba(239,68,68,0.15);  border-color: rgba(239,68,68,0.3);  color: #fca5a5; }
+.status-badge.blue   { background: rgba(59,130,246,0.15); border-color: rgba(59,130,246,0.3); color: #93c5fd; }
+.status-badge.orange { background: rgba(249,115,22,0.15); border-color: rgba(249,115,22,0.3); color: #fdba74; }
+.status-badge.gray   { background: rgba(100,116,139,0.15);border-color: rgba(100,116,139,0.25);color: #94a3b8; }
+
+/* ── Camera feed ── */
+.cam-feed {
+    position: relative;
+    background: rgba(15,23,42,0.7);
+    border-radius: 10px;
+    overflow: hidden;
+    aspect-ratio: 4/3;
+    min-height: 200px;
+    border: 1px solid rgba(255,255,255,0.06);
+}
+.cam-feed canvas {
+    position: absolute; inset: 0; width: 100%; height: 100%;
+}
+
+/* ── Overlays on camera feed ── */
+.badge-alert { position: absolute; top: 8px; right: 8px; z-index: 10; }
+.lock-bar    { position: absolute; bottom: 12px; left: 50%; transform: translateX(-50%); z-index: 10; white-space: nowrap; }
+
+#motion-flash {
+    position: absolute; inset: 0; pointer-events: none; z-index: 15;
+    border: 4px solid transparent; transition: border-color 0.1s;
+    border-radius: 10px;
+}
+#motion-flash.active { border-color: #ef4444; box-shadow: inset 0 0 40px rgba(239,68,68,0.4); }
+
+#unlock-overlay, #camera-off-overlay {
+    position: absolute; inset: 0; display: flex; flex-direction: column;
+    align-items: center; justify-content: center; z-index: 20;
+    pointer-events: none; opacity: 0; transition: opacity 0.4s;
+    background: rgba(0,0,0,0.6);
+    backdrop-filter: blur(6px);
+    -webkit-backdrop-filter: blur(6px);
+}
+#unlock-overlay.show, #camera-off-overlay.show { opacity: 1; pointer-events: auto; }
+
+.check-icon { font-size: 3.5rem; color: #10b981; }
+
+/* ── Lock status pill ── */
+.lock-pill {
+    display: inline-flex; align-items: center; gap: 0.5rem;
+    padding: 0.4rem 1rem;
+    border-radius: 999px;
+    font-size: 0.78rem; font-weight: 600;
+    backdrop-filter: blur(10px);
+    -webkit-backdrop-filter: blur(10px);
+    border: 1px solid rgba(255,255,255,0.1);
+    transition: background 0.3s;
+}
+.lock-pill.locked   { background: rgba(15,23,42,0.82); color: #f1f5f9; }
+.lock-pill.unlocked { background: rgba(16,185,129,0.22); border-color: rgba(16,185,129,0.35); color: #6ee7b7; }
+
+/* ── Stats row ── */
+.stats-row {
+    display: flex; flex-wrap: wrap; gap: 0.4rem;
+    margin-top: 0.75rem;
+    font-size: 0.72rem;
+}
+.stat-chip {
+    display: inline-flex; align-items: center; gap: 0.3rem;
+    padding: 0.2rem 0.6rem;
+    background: rgba(255,255,255,0.05);
+    border: 1px solid rgba(255,255,255,0.07);
+    border-radius: 999px;
+    color: #94a3b8;
+}
+html:not(.dark) .stat-chip {
+    background: rgba(0,0,0,0.04);
+    border-color: rgba(0,0,0,0.08);
+    color: #64748b;
+}
+.stat-chip .val { font-weight: 600; color: #e2e8f0; }
+html:not(.dark) .stat-chip .val { color: #0f172a; }
+.fps-high { color: #10b981; } .fps-mid { color: #f59e0b; } .fps-low { color: #ef4444; }
+
+/* ── Buttons ── */
+.btn-sm {
+    display: inline-flex; align-items: center; gap: 0.3rem;
+    padding: 0.35rem 0.75rem;
+    border-radius: 8px; font-size: 0.75rem; font-weight: 500;
+    cursor: pointer; border: 1px solid transparent;
+    transition: opacity 0.15s, transform 0.1s;
+}
+.btn-sm:active { transform: scale(0.97); }
+.btn-blue  { background: #3b82f6; color: #fff; border-color: rgba(59,130,246,0.5); }
+.btn-blue:hover  { background: #2563eb; }
+.btn-green { background: #10b981; color: #fff; border-color: rgba(16,185,129,0.5); }
+.btn-green:hover { background: #059669; }
+.btn-red   { background: #ef4444; color: #fff; border-color: rgba(239,68,68,0.5); }
+.btn-red:hover   { background: #dc2626; }
+.btn-gray  {
+    background: rgba(100,116,139,0.18);
+    border-color: rgba(100,116,139,0.25);
+    color: #94a3b8;
+}
+.btn-gray:hover { background: rgba(100,116,139,0.28); color: #f1f5f9; }
+
+/* ── Camera select ── */
+.cam-select {
+    background: rgba(30,41,59,0.6);
+    border: 1px solid rgba(255,255,255,0.1);
+    color: #e2e8f0;
+    padding: 0.3rem 0.65rem;
+    border-radius: 8px;
+    font-size: 0.72rem;
+    min-width: 190px; max-width: 300px;
+    font-family: inherit;
+}
+html:not(.dark) .cam-select {
+    background: rgba(255,255,255,0.6);
+    border-color: rgba(0,0,0,0.1);
+    color: #0f172a;
+}
+.cam-select:focus { outline: none; border-color: rgba(59,130,246,0.5); }
+.cam-select:disabled { opacity: 0.45; cursor: not-allowed; }
+option:disabled { color: #6b7280; }
+
+/* ── Log panel ── */
+.log-inner {
+    max-height: 260px; overflow-y: auto;
+    display: flex; flex-direction: column; gap: 0.35rem;
+    padding-right: 2px;
+}
+
+/* ── History / motion cards ── */
+.history-card, .motion-card {
+    display: flex; align-items: center; gap: 0.6rem;
+    padding: 0.5rem 0.65rem;
+    background: rgba(255,255,255,0.04);
+    border: 1px solid rgba(255,255,255,0.07);
+    border-radius: 10px;
+    border-left: 3px solid rgba(100,116,139,0.4);
+}
+html:not(.dark) .history-card, html:not(.dark) .motion-card {
+    background: rgba(0,0,0,0.03);
+    border-color: rgba(0,0,0,0.08);
+    border-left-color: rgba(100,116,139,0.3);
+}
+.history-card img { width: 46px; height: 34px; object-fit: cover; border-radius: 6px; flex-shrink: 0; }
+.motion-card.alert {
+    border-left-color: #ef4444;
+    background: rgba(239,68,68,0.08);
+}
+
+/* ── Main two-column grid ── */
+.grid-main { display: grid; grid-template-columns: 1fr 300px; gap: 1rem; }
+@media (max-width: 1024px) { .grid-main { grid-template-columns: 1fr; } }
+
+/* ── Divider ── */
+.cam-divider { width: 1px; background: rgba(148,163,184,0.15); align-self: stretch; display: none; }
+@media (min-width: 640px) { .cam-divider { display: block; } }
 </style>
 @endpush
 
 @section('content')
+<div class="recog-wrap">
 
-{{-- Connection status bar --}}
+{{-- 1. Connection status bar --}}
 <div class="conn-bar">
-    <span>
-        <i id="conn-dot" class="fas fa-circle text-[8px] text-red-400"></i>
-        <span id="conn-text" class="text-xs text-red-400 ml-1">Offline</span> — Kamera Pintu
+    <span class="flex items-center gap-1.5">
+        <i id="conn-dot" class="fas fa-circle text-[7px] text-red-400"></i>
+        <span id="conn-text" class="text-red-400">Offline</span>
+        <span class="text-slate-500">— Kamera Pintu</span>
     </span>
-    <span>
-        <i id="yard-conn-dot" class="fas fa-circle text-[8px] text-red-400"></i>
-        <span id="yard-conn-text" class="text-xs text-red-400 ml-1">Offline</span> — CCTV
+    <div class="sep"></div>
+    <span class="flex items-center gap-1.5">
+        <i id="yard-conn-dot" class="fas fa-circle text-[7px] text-red-400"></i>
+        <span id="yard-conn-text" class="text-red-400">Offline</span>
+        <span class="text-slate-500">— CCTV</span>
     </span>
-    <span class="text-xs text-gray-500 ml-auto">Backend: {{ $backendUrl }}</span>
+    <div class="sep"></div>
+    <span class="backend-label">Backend: {{ $backendUrl }}</span>
 </div>
 
-{{-- Camera selector panel --}}
-<div class="panel mb-4">
-    <div class="flex flex-wrap items-center gap-3 mb-2">
+{{-- 2. Camera selector panel --}}
+<div class="g-card">
+    <div class="flex flex-wrap items-center gap-3 mb-2.5">
         {{-- Door --}}
-        <div class="flex items-center gap-2">
-            <i class="fas fa-door-open text-blue-400 text-sm"></i>
-            <label class="text-xs text-gray-300 whitespace-nowrap">Pintu (Face Recognition):</label>
+        <div class="flex items-center gap-2 flex-wrap">
+            <i class="fas fa-door-open text-blue-400 text-sm flex-shrink-0"></i>
+            <label class="text-xs text-slate-400 whitespace-nowrap">Pintu (Face Recognition):</label>
             <select id="door-cam-select" class="cam-select" disabled>
                 <option value="">Memuat…</option>
             </select>
             <button id="btn-apply-door" class="btn-sm btn-blue">
-                <i class="fas fa-check mr-1"></i>Terapkan
+                <i class="fas fa-check"></i>Terapkan
             </button>
         </div>
-        <span class="text-gray-600 hidden sm:inline">|</span>
+        <div class="cam-divider"></div>
         {{-- Yard --}}
-        <div class="flex items-center gap-2">
-            <i class="fas fa-video text-green-400 text-sm"></i>
-            <label class="text-xs text-gray-300 whitespace-nowrap">CCTV (Motion):</label>
+        <div class="flex items-center gap-2 flex-wrap">
+            <i class="fas fa-video text-emerald-400 text-sm flex-shrink-0"></i>
+            <label class="text-xs text-slate-400 whitespace-nowrap">CCTV (Motion):</label>
             <select id="yard-cam-select" class="cam-select" disabled>
                 <option value="">Memuat…</option>
             </select>
             <button id="btn-apply-yard" class="btn-sm btn-blue">
-                <i class="fas fa-check mr-1"></i>Terapkan
+                <i class="fas fa-check"></i>Terapkan
             </button>
         </div>
         <button id="btn-refresh-cameras" class="btn-sm btn-gray ml-auto">
-            <i class="fas fa-sync-alt mr-1"></i>Refresh
+            <i class="fas fa-sync-alt"></i>Refresh
         </button>
     </div>
-    <p id="cam-selector-note" class="text-xs text-gray-500">
+    <p id="cam-selector-note" class="text-[0.7rem] text-slate-500">
         <i class="fas fa-spinner fa-spin mr-1"></i>Mendeteksi kamera…
     </p>
 </div>
 
+{{-- 3. Two-column main grid --}}
 <div class="grid-main">
-    {{-- Left: dual camera feeds --}}
-    <div class="space-y-4">
 
-        {{-- DOOR — face recognition --}}
-        <div class="panel">
-            <div class="panel-header">
-                <span class="panel-title">
-                    <i class="fas fa-door-open text-blue-400"></i>Kamera Pintu — Face Recognition
+    {{-- Left column: dual camera feeds --}}
+    <div class="flex flex-col gap-4">
+
+        {{-- 4. Door feed — face recognition --}}
+        <div class="g-card">
+            <div class="g-card-header">
+                <span class="g-card-title">
+                    <i class="fas fa-door-open text-blue-400"></i>
+                    <span id="door-cam-title">Kamera Pintu — Face Recognition</span>
                 </span>
-                <span id="recognition-status" class="px-2 py-1 text-xs rounded bg-yellow-700 flex items-center gap-1">
+                <span id="recognition-status" class="status-badge yellow">
                     <i class="fas fa-circle-notch fa-spin"></i>Menghubungkan…
                 </span>
             </div>
+
+            {{-- Camera feed with overlays --}}
             <div class="cam-feed">
                 <canvas id="overlay-canvas"></canvas>
+
+                {{-- ACCESS GRANTED overlay --}}
                 <div id="unlock-overlay">
                     <div class="check-icon"><i class="fas fa-check-circle"></i></div>
-                    <div class="text-xl font-bold text-green-400 mt-2">ACCESS GRANTED</div>
-                    <div id="unlock-name-display" class="text-green-300 mt-1"></div>
-                    <div id="unlock-pct-display" class="text-green-400/70 text-sm mt-1"></div>
+                    <div class="text-lg font-bold text-emerald-400 mt-2 tracking-wide">ACCESS GRANTED</div>
+                    <div id="unlock-name-display" class="text-emerald-300 text-sm mt-1 font-medium"></div>
+                    <div id="unlock-pct-display" class="text-emerald-400/70 text-xs mt-1"></div>
                 </div>
+
+                {{-- Camera-off / countdown overlay --}}
                 <div id="camera-off-overlay">
-                    <i class="fas fa-camera-slash text-4xl text-gray-400 mb-3"></i>
-                    <p class="text-gray-300 text-sm mb-3">Sesi selesai</p>
-                    <button id="btn-cam-off-restart" class="btn-sm btn-blue pointer-events-auto">Mulai Ulang</button>
+                    <i class="fas fa-check-circle text-3xl text-emerald-400 mb-3"></i>
+                    <p class="text-emerald-300 text-sm font-semibold mb-1">Akses Diberikan</p>
+                    <p class="text-slate-400 text-xs mb-3">
+                        Memulai ulang dalam <span id="restart-countdown">5</span> detik…
+                    </p>
+                    <button id="btn-cam-off-restart" class="btn-sm btn-blue pointer-events-auto">
+                        <i class="fas fa-redo"></i>Mulai Sekarang
+                    </button>
                 </div>
+
+                {{-- Lock status bar --}}
                 <div class="lock-bar">
-                    <div id="lock-status" class="inline-flex items-center px-4 py-2 rounded-lg bg-gray-900/80 backdrop-blur-sm gap-2">
-                        <i id="lock-icon" class="fas fa-lock text-xl text-red-400"></i>
-                        <span id="lock-text">LOCKED</span>
-                        <span id="user-info" class="hidden text-xs text-green-300"></span>
+                    <div id="lock-status" class="lock-pill locked">
+                        <i id="lock-icon" class="fas fa-lock text-red-400"></i>
+                        <span id="lock-text" class="text-xs font-semibold tracking-wider">LOCKED</span>
+                        <span id="user-info" class="hidden text-xs text-emerald-300 font-normal"></span>
                     </div>
                 </div>
             </div>
+
+            {{-- Stats row --}}
             <div class="stats-row">
                 <span class="stat-chip">Wajah: <span class="val" id="face-count">0</span></span>
-                <span class="stat-chip">Proses: <span class="val" id="process-time">0</span>ms</span>
+                <span class="stat-chip">Proses: <span class="val" id="process-time">0</span> ms</span>
                 <span class="stat-chip">FPS: <span class="val fps-high" id="fps-counter">0</span></span>
-                <span class="stat-chip hidden" id="user-indicator-wrapper">
-                    <i class="fas fa-user-check text-green-400 mr-1"></i>
+                <span class="stat-chip hidden" id="user-indicator-wrapper" style="border-color:rgba(16,185,129,0.3);">
+                    <i class="fas fa-user-check text-emerald-400"></i>
                     <span class="val" id="user-indicator"></span>
                 </span>
             </div>
             <button id="btn-restart-scan" class="btn-sm btn-gray mt-2 hidden">
-                <i class="fas fa-redo mr-1"></i>Scan Ulang
+                <i class="fas fa-redo"></i>Scan Ulang
             </button>
         </div>
 
-        {{-- YARD — CCTV motion detection --}}
-        <div class="panel">
-            <div class="panel-header">
-                <span class="panel-title">
-                    <i class="fas fa-video text-green-400"></i>CCTV — Deteksi Gerakan
+        {{-- 5. CCTV feed — motion detection --}}
+        <div class="g-card">
+            <div class="g-card-header">
+                <span class="g-card-title">
+                    <i class="fas fa-video text-emerald-400"></i>
+                    <span id="yard-cam-title">CCTV — Deteksi Gerakan</span>
                 </span>
                 <div class="flex items-center gap-2">
-                    <span id="motion-status-chip" class="px-2 py-1 text-xs rounded bg-gray-700 flex items-center gap-1">
-                        <i class="fas fa-circle-notch fa-spin text-gray-400"></i>
-                        <span class="text-gray-400">Menghubungkan…</span>
+                    <span id="motion-status-chip" class="status-badge gray">
+                        <i class="fas fa-circle-notch fa-spin"></i>
+                        <span>Menghubungkan…</span>
                     </span>
-                    <span id="yard-status" class="px-2 py-1 text-xs rounded bg-yellow-700 flex items-center gap-1">
+                    <span id="yard-status" class="status-badge yellow">
                         <i class="fas fa-circle-notch fa-spin"></i>Menghubungkan…
                     </span>
                 </div>
             </div>
+
             <div class="cam-feed">
                 <canvas id="yard-canvas"></canvas>
                 <div id="motion-flash"></div>
-                <span id="motion-alert-badge" class="badge-alert hidden px-2 py-1 text-xs rounded bg-red-600 font-bold animate-pulse">
-                    <i class="fas fa-exclamation-triangle mr-1"></i>ALERT
+                <span id="motion-alert-badge" class="badge-alert hidden">
+                    <span class="status-badge red" style="animation: pulse 1s infinite;">
+                        <i class="fas fa-exclamation-triangle"></i>ALERT
+                    </span>
                 </span>
             </div>
+
             <div class="stats-row">
                 <span class="stat-chip">FPS: <span class="val fps-high" id="yard-fps">0</span></span>
-                <span class="stat-chip">Objek: <span class="val" id="motion-count">0</span></span>
                 <span class="stat-chip">Area gerak: <span class="val" id="motion-ratio">0%</span></span>
+                <span class="stat-chip hidden" id="motion-count-chip">
+                    <i class="fas fa-bell text-red-400"></i>
+                    <span class="val text-red-400" id="motion-count">0</span> alert
+                </span>
             </div>
         </div>
-    </div>
 
-    {{-- Right: logs --}}
-    <div class="space-y-4">
-        <div class="log-panel">
-            <h3><i class="fas fa-door-open text-green-400 mr-1"></i>Riwayat Akses</h3>
-            <div id="history-list"></div>
-            <p id="history-empty" class="text-xs text-gray-500 text-center py-4">Belum ada akses tercatat</p>
+    </div>{{-- end left column --}}
+
+    {{-- Right column: logs panel --}}
+    <div class="flex flex-col gap-4">
+
+        {{-- Access history log --}}
+        <div class="g-card flex flex-col gap-0" style="flex: 1;">
+            <div class="g-card-header" style="margin-bottom: 0.6rem;">
+                <span class="g-card-title">
+                    <i class="fas fa-clock-rotate-left text-emerald-400"></i>
+                    Riwayat Akses
+                </span>
+            </div>
+            <div class="log-inner" id="history-list"></div>
+            <p id="history-empty" class="text-[0.7rem] text-slate-500 text-center py-4">
+                Belum ada akses tercatat
+            </p>
         </div>
-        <div class="log-panel">
-            <div class="flex items-center justify-between mb-2">
-                <h3><i class="fas fa-bell text-red-400 mr-1"></i>Log Deteksi Gerakan</h3>
-                <button id="btn-clear-motion" class="text-xs text-gray-400 hover:text-white">
-                    <i class="fas fa-trash mr-1"></i>Hapus
+
+        {{-- Motion log --}}
+        <div class="g-card flex flex-col gap-0" style="flex: 1;">
+            <div class="g-card-header" style="margin-bottom: 0.6rem;">
+                <span class="g-card-title">
+                    <i class="fas fa-bell text-red-400"></i>
+                    Log Deteksi Gerakan
+                </span>
+                <button id="btn-clear-motion" class="btn-sm btn-gray" style="padding: 0.2rem 0.55rem; font-size: 0.68rem;">
+                    <i class="fas fa-trash"></i>Hapus
                 </button>
             </div>
-            <div id="motion-log-list"></div>
-            <p id="motion-log-empty" class="text-xs text-gray-500 text-center py-4">Belum ada gerakan terdeteksi</p>
+            <div class="log-inner" id="motion-log-list"></div>
+            <p id="motion-log-empty" class="text-[0.7rem] text-slate-500 text-center py-4">
+                Belum ada gerakan terdeteksi
+            </p>
         </div>
-    </div>
-</div>
+
+    </div>{{-- end right column --}}
+
+</div>{{-- end grid-main --}}
+</div>{{-- end recog-wrap --}}
 @endsection
 
 @push('scripts')
@@ -255,12 +478,17 @@ const elMotionBadge   = document.getElementById('motion-alert-badge');
 const elMotionChip    = document.getElementById('motion-status-chip');
 const elMotionFlash   = document.getElementById('motion-flash');
 const elYardFps       = document.getElementById('yard-fps');
-const elMotionCount   = document.getElementById('motion-count');
+const elMotionCount   = document.getElementById('motion-count');      // ✅ ID sekarang ada
+const elMotionCountChip = document.getElementById('motion-count-chip');
 const elMotionRatio   = document.getElementById('motion-ratio');
 const elYardConnDot   = document.getElementById('yard-conn-dot');
 const elYardConnText  = document.getElementById('yard-conn-text');
 const elMotionLogList = document.getElementById('motion-log-list');
 const elMotionEmpty   = document.getElementById('motion-log-empty');
+
+// ── DOM — camera titles ───────────────────────────────────────────────────────
+const elDoorCamTitle = document.getElementById('door-cam-title');
+const elYardCamTitle = document.getElementById('yard-cam-title');
 
 // ── DOM — selector ────────────────────────────────────────────────────────────
 const elDoorSel = document.getElementById('door-cam-select');
@@ -272,7 +500,29 @@ let ws = null, wsMotion = null;
 let rcTimer = null, rcMotionTimer = null;
 let rcAttempts = 0, rcMotionAttempts = 0;
 let sessionLocked = false, lastResult = null;
+let motionAlertCount = 0;   // counter total alert gerakan di sesi ini
 
+// Auto-reload: restart session if no face detected for 3 seconds
+let noFaceTimer = null;
+const NO_FACE_TIMEOUT = 3000; // ms
+
+function resetNoFaceTimer() {
+    clearTimeout(noFaceTimer);
+    noFaceTimer = null;
+}
+
+function startNoFaceTimer() {
+    if (sessionLocked || noFaceTimer) return;
+    noFaceTimer = setTimeout(() => {
+        noFaceTimer = null;
+        if (!sessionLocked) {
+            restartSession();
+        }
+    }, NO_FACE_TIMEOUT);
+}
+</script>
+
+<script>
 // ── FPS helper ────────────────────────────────────────────────────────────────
 function makeFps() {
     const b = new Float64Array(60); let i = 0, full = false;
@@ -333,6 +583,22 @@ async function loadCameras(reprobe = false) {
         elDoorSel.disabled  = false;
         elYardSel.disabled  = false;
 
+        // Update judul card dengan nama kamera aktual dari backend
+        const doorCam = cams.find(c => c.id === d.door_cam_id);
+        const yardCam = cams.find(c => c.id === d.yard_cam_id);
+        if (doorCam && elDoorCamTitle) {
+            elDoorCamTitle.textContent = `${doorCam.name} (${doorCam.node}) — Face Recognition`;
+        }
+        if (yardCam && elYardCamTitle) {
+            elYardCamTitle.textContent = `${yardCam.name} (${yardCam.node}) — Deteksi Gerakan`;
+        }
+
+        // Update conn-bar labels
+        const doorConnLabel = document.querySelector('#conn-text + span');
+        const yardConnLabel = document.querySelector('#yard-conn-text + span');
+        if (doorCam && doorConnLabel) doorConnLabel.textContent = `— ${doorCam.node}`;
+        if (yardCam && yardConnLabel) yardConnLabel.textContent = `— ${yardCam.node}`;
+
         const availCount = cams.filter(c => c.available).length;
         elNote.innerHTML =
             `<i class="fas fa-info-circle text-blue-400 mr-1"></i>` +
@@ -349,7 +615,9 @@ async function loadCameras(reprobe = false) {
             `<i class="fas fa-times-circle text-red-400 mr-1"></i>Gagal terhubung: ${e.message}`;
     }
 }
+</script>
 
+<script>
 async function applyCamera(role, selectEl, btnEl) {
     const id = +selectEl.value;
     if (isNaN(id) || selectEl.value === '') { alert('Pilih kamera terlebih dahulu.'); return; }
@@ -411,7 +679,9 @@ document.getElementById('btn-apply-door').addEventListener('click', () =>
 document.getElementById('btn-apply-yard').addEventListener('click', () =>
     applyCamera('yard', elYardSel, document.getElementById('btn-apply-yard')));
 document.getElementById('btn-refresh-cameras').addEventListener('click', () => loadCameras(true));
+</script>
 
+<script>
 // ═════════════════════════════════════════════════════════════════════════════
 // DOOR — face recognition
 // ═════════════════════════════════════════════════════════════════════════════
@@ -446,19 +716,26 @@ function updateRecogUI(data) {
     elProcTime.textContent=data.process_time_ms||0;
     drawBbox(data);
     if (data.face_detected&&data.matched){
+        resetNoFaceTimer();
         elIndWrap.classList.remove('hidden'); elIndWrap.style.display='inline-flex';
         elInd.textContent=`${data.name} (${Math.round(data.percentage)}%)`;
     } else elIndWrap.classList.add('hidden');
     data.unlocked?setLock(true,data.name,data.percentage):setLock(false);
     const qmap={too_small:'Terlalu jauh',too_close:'Terlalu dekat',multiple_faces:'Beberapa wajah'};
     if (data.quality_issue){
-        elStatus.className='px-2 py-1 text-xs rounded bg-orange-600 flex items-center gap-1';
+        // Quality issue counts as "face present" — reset timer
+        resetNoFaceTimer();
+        elStatus.className='status-badge orange';
         elStatus.innerHTML=`<i class="fas fa-exclamation-triangle"></i>${qmap[data.quality_issue]||data.quality_issue}`;
     } else if (data.face_detected){
-        elStatus.className='px-2 py-1 text-xs rounded bg-blue-600 flex items-center gap-1';
+        // Face detected — reset timer
+        resetNoFaceTimer();
+        elStatus.className='status-badge blue';
         elStatus.innerHTML='<i class="fas fa-face-smile"></i>Wajah terdeteksi';
     } else {
-        elStatus.className='px-2 py-1 text-xs rounded bg-yellow-600 flex items-center gap-1';
+        // No face — start countdown to reload
+        startNoFaceTimer();
+        elStatus.className='status-badge yellow';
         elStatus.innerHTML='<i class="fas fa-circle-notch fa-spin"></i>Scanning…';
         lastResult=null; elIndWrap.classList.add('hidden');
     }
@@ -466,32 +743,81 @@ function updateRecogUI(data) {
 
 function setLock(ok,name='',pct=0){
     if (ok){
-        elLockIcon.className='fas fa-lock-open text-xl text-green-400';
+        elLockIcon.className='fas fa-lock-open text-emerald-400';
         elLockText.textContent='UNLOCKED';
-        elLockStatus.className='inline-flex items-center px-4 py-2 rounded-lg bg-green-900/80 backdrop-blur-sm gap-2';
+        elLockStatus.className='lock-pill unlocked';
         elUserInfo.textContent=`${name}  ${Math.round(pct)}%`;
-        elUserInfo.className='text-xs text-green-300'; elUserInfo.classList.remove('hidden');
+        elUserInfo.className='text-xs text-emerald-300'; elUserInfo.classList.remove('hidden');
     } else {
-        elLockIcon.className='fas fa-lock text-xl text-red-400';
+        elLockIcon.className='fas fa-lock text-red-400';
         elLockText.textContent='LOCKED';
-        elLockStatus.className='inline-flex items-center px-4 py-2 rounded-lg bg-gray-900/80 backdrop-blur-sm gap-2';
+        elLockStatus.className='lock-pill locked';
         elUserInfo.classList.add('hidden');
     }
+}
+</script>
+
+<script>
+const AUTO_RESTART_DELAY = 5;   // detik sebelum auto-restart setelah unlock
+
+let autoRestartTimer   = null;
+let countdownInterval  = null;
+const elCountdown      = () => document.getElementById('restart-countdown');
+
+function startAutoRestart() {
+    // Clear any previous timers
+    clearTimeout(autoRestartTimer);
+    clearInterval(countdownInterval);
+
+    let remaining = AUTO_RESTART_DELAY;
+    const cdEl = elCountdown();
+    if (cdEl) cdEl.textContent = remaining;
+
+    // Tick countdown every second
+    countdownInterval = setInterval(() => {
+        remaining--;
+        const el = elCountdown();
+        if (el) el.textContent = remaining;
+        if (remaining <= 0) {
+            clearInterval(countdownInterval);
+            countdownInterval = null;
+        }
+    }, 1000);
+
+    // Auto restart after delay
+    autoRestartTimer = setTimeout(() => {
+        clearInterval(countdownInterval);
+        countdownInterval = null;
+        restartSession();
+    }, AUTO_RESTART_DELAY * 1000);
+}
+
+function cancelAutoRestart() {
+    clearTimeout(autoRestartTimer);
+    clearInterval(countdownInterval);
+    autoRestartTimer  = null;
+    countdownInterval = null;
 }
 
 function handleUnlocked(data){
     sessionLocked=true;
+    resetNoFaceTimer();
     elUnlockName.textContent=data.name;
     elUnlockPct.textContent=`Kecocokan: ${Math.round(data.percentage)}%`;
-    elUnlockOvr.classList.add('show'); setLock(true,data.name,data.percentage);
-    elStatus.className='px-2 py-1 text-xs rounded bg-green-600 flex items-center gap-1';
+    elUnlockOvr.classList.add('show');
+    setLock(true, data.name, data.percentage);
+    elStatus.className='status-badge green';
     elStatus.innerHTML='<i class="fas fa-check-circle"></i>Access Granted';
-    setTimeout(()=>{
+
+    // After 3.2 s: hide ACCESS GRANTED, show countdown overlay, begin auto-restart
+    setTimeout(() => {
         elUnlockOvr.classList.remove('show');
         elCamOff.classList.add('show');
         elBtnRestart.classList.remove('hidden');
         ws?.close();
-    },3200);
+        startAutoRestart();
+    }, 3200);
+
     addHistCard(data);
 }
 
@@ -517,9 +843,11 @@ async function loadHistory(){
 
 function restartSession(){
     sessionLocked=false; lastResult=null;
+    resetNoFaceTimer();
+    cancelAutoRestart();
     elCamOff.classList.remove('show'); elUnlockOvr.classList.remove('show');
     elBtnRestart.classList.add('hidden'); setLock(false);
-    elStatus.className='px-2 py-1 text-xs rounded bg-yellow-600 flex items-center gap-1';
+    elStatus.className='status-badge yellow';
     elStatus.innerHTML='<i class="fas fa-circle-notch fa-spin"></i>Menghubungkan…';
     canvas.width=320; canvas.height=240;
     ctx.fillStyle='#111827'; ctx.fillRect(0,0,320,240);
@@ -529,7 +857,9 @@ function restartSession(){
 }
 elBtnRestart.addEventListener('click', restartSession);
 elBtnCamOff.addEventListener('click', restartSession);
+</script>
 
+<script>
 function setConn(st){
     const m={connecting:['text-yellow-400','Menghubungkan…'],online:['text-green-400','Online'],offline:['text-red-400','Offline']};
     const[cls,txt]=m[st]||m.offline;
@@ -543,7 +873,7 @@ function startSession(){
     setConn('connecting');
     ws=new WebSocket(WS_URL);
     ws.onopen=()=>{ rcAttempts=0; setConn('online');
-        elStatus.className='px-2 py-1 text-xs rounded bg-green-600 flex items-center gap-1';
+        elStatus.className='status-badge green';
         elStatus.innerHTML='<i class="fas fa-circle"></i>Terhubung — Scanning…'; };
     ws.onmessage=({data:raw})=>{ let d; try{d=JSON.parse(raw);}catch{return;}
         if(d.type==='ping') ws.send('{"type":"pong"}');
@@ -551,10 +881,10 @@ function startSession(){
         else if(d.type==='result') updateRecogUI(d);
         else if(d.type==='unlocked_final') handleUnlocked(d);
         else if(d.type==='error'){
-            elStatus.className='px-2 py-1 text-xs rounded bg-red-600 flex items-center gap-1';
+            elStatus.className='status-badge red';
             elStatus.innerHTML=`<i class="fas fa-times-circle"></i>${d.message}`; } };
     ws.onclose=()=>{ setConn('offline'); if(sessionLocked) return;
-        elStatus.className='px-2 py-1 text-xs rounded bg-red-600 flex items-center gap-1';
+        elStatus.className='status-badge red';
         elStatus.innerHTML='<i class="fas fa-times"></i>Terputus';
         rcAttempts++;
         rcTimer=setTimeout(startSession, Math.min(1000*Math.pow(1.5,rcAttempts), MAX_RC)); };
@@ -577,30 +907,29 @@ function displayYard(b64){
     });
 }
 
-function drawMotionBoxes(cnts){
-    if(!cnts?.length) return;
-    yardCtx.strokeStyle='#ef4444'; yardCtx.lineWidth=2;
-    yardCtx.shadowColor='#ef4444'; yardCtx.shadowBlur=8;
-    cnts.forEach(b=>yardCtx.strokeRect(b.x,b.y,b.w,b.h));
-    yardCtx.shadowBlur=0;
-}
-
 function handleMotion(data){
-    elMotionCount.textContent=data.contours?.length||0;
-    elMotionRatio.textContent=((data.motion_ratio||0)*100).toFixed(1)+'%';
-    drawMotionBoxes(data.contours);
-    if(data.alert){
+    // ✅ FIX: motion_ratio dari backend sudah dalam persen (0-100), tidak perlu *100 lagi
+    const ratio = data.motion_ratio || 0;
+    elMotionRatio.textContent = ratio.toFixed(1) + '%';
+
+    if(data.motion){
         elMotionFlash.classList.add('active');
         clearTimeout(motionFlashTimer);
         motionFlashTimer=setTimeout(()=>elMotionFlash.classList.remove('active'),800);
         elMotionBadge.classList.remove('hidden');
-        elMotionChip.className='px-2 py-1 text-xs rounded bg-red-700 flex items-center gap-1';
-        elMotionChip.innerHTML='<i class="fas fa-exclamation-triangle text-white"></i><span class="text-white font-semibold">ALERT</span>';
+        elMotionChip.className='status-badge red';
+        elMotionChip.innerHTML='<i class="fas fa-exclamation-triangle"></i><span class="font-semibold">ALERT</span>';
+
+        // Update motion counter
+        motionAlertCount++;
+        if (elMotionCount) elMotionCount.textContent = motionAlertCount;
+        if (elMotionCountChip) elMotionCountChip.classList.remove('hidden');
+
         clearTimeout(window._mbTimer);
         window._mbTimer=setTimeout(()=>{
             elMotionBadge.classList.add('hidden');
-            elMotionChip.className='px-2 py-1 text-xs rounded bg-green-700 flex items-center gap-1';
-            elMotionChip.innerHTML='<i class="fas fa-eye text-white"></i><span class="text-white">Memantau</span>';
+            elMotionChip.className='status-badge green';
+            elMotionChip.innerHTML='<i class="fas fa-eye"></i><span>Memantau</span>';
         },5000);
         addMotionCard(data);
     }
@@ -609,33 +938,35 @@ function handleMotion(data){
 function addMotionCard(data){
     elMotionEmpty.style.display='none';
     const c=document.createElement('div');
-    c.className='motion-card'+(data.alert?' alert':'');
+    c.className='motion-card alert';
     const ts=new Date().toLocaleTimeString('id-ID',{hour:'2-digit',minute:'2-digit',second:'2-digit'});
+    // ✅ FIX: motion_ratio sudah dalam persen dari backend
+    const ratio = (data.motion_ratio||0).toFixed(1);
     c.innerHTML=`<div class="flex-1 min-w-0">
-      <div class="text-xs font-semibold ${data.alert?'text-red-400':'text-yellow-400'}">
-        <i class="fas fa-${data.alert?'exclamation-triangle':'circle-dot'} mr-1"></i>
-        ${data.alert?'Objek Terdeteksi':'Gerakan Terdeteksi'}
+      <div class="text-xs font-semibold text-red-400">
+        <i class="fas fa-exclamation-triangle mr-1"></i>Gerakan Terdeteksi
       </div>
-      <div class="text-xs text-gray-500">${ts} · ${data.contours?.length||0} objek · ${((data.motion_ratio||0)*100).toFixed(1)}%</div>
-    </div><i class="fas fa-bell ${data.alert?'text-red-400':'text-yellow-600'} text-sm flex-shrink-0"></i>`;
+      <div class="text-xs text-gray-500">${ts} · ${ratio}% area</div>
+    </div><i class="fas fa-bell text-red-400 text-sm flex-shrink-0"></i>`;
     elMotionLogList.insertBefore(c, elMotionLogList.firstChild);
     while(elMotionLogList.children.length>50) elMotionLogList.lastChild.remove();
 }
+</script>
 
+<script>
 function setYardConn(st){
     const m={connecting:['text-yellow-400','Menghubungkan…'],online:['text-green-400','Memantau'],offline:['text-red-400','Offline']};
     const[cls,txt]=m[st]||m.offline;
     elYardConnDot.className=`fas fa-circle text-[8px] ${cls}`;
     elYardConnText.textContent=txt; elYardConnText.className=`text-xs ${cls}`;
-    const bg=st==='online'?'bg-green-700':st==='connecting'?'bg-yellow-700':'bg-red-700';
-    elYardStatus.className=`px-2 py-1 text-xs rounded flex items-center gap-1 ${bg}`;
+    elYardStatus.className=`status-badge ${st==='online'?'green':st==='connecting'?'yellow':'red'}`;
     elYardStatus.innerHTML=st==='online'?'<i class="fas fa-eye"></i>Aktif'
         :st==='connecting'?'<i class="fas fa-circle-notch fa-spin"></i>Menghubungkan…'
         :'<i class="fas fa-times"></i>Terputus';
-    elMotionChip.className=`px-2 py-1 text-xs rounded ${st==='online'?'bg-green-700':'bg-gray-700'} flex items-center gap-1`;
+    elMotionChip.className=`status-badge ${st==='online'?'green':'gray'}`;
     elMotionChip.innerHTML=st==='online'
-        ?'<i class="fas fa-eye text-white"></i><span class="text-white">Memantau</span>'
-        :'<i class="fas fa-circle-notch fa-spin text-gray-400"></i><span class="text-gray-400">Menghubungkan…</span>';
+        ?'<i class="fas fa-eye"></i><span>Memantau</span>'
+        :'<i class="fas fa-circle-notch fa-spin"></i><span>Menghubungkan…</span>';
 }
 
 function startMotion(){
@@ -646,8 +977,13 @@ function startMotion(){
     wsMotion.onopen=()=>{ rcMotionAttempts=0; setYardConn('online'); };
     wsMotion.onmessage=({data:raw})=>{ let d; try{d=JSON.parse(raw);}catch{return;}
         if(d.type==='ping') wsMotion.send('{"type":"pong"}');
-        else if(d.type==='frame') displayYard(d.image);
-        else if(d.type==='motion') handleMotion(d);
+        else if(d.type==='frame'){
+            // ✅ FIX: backend mengirim motion data inline di dalam pesan type:"frame"
+            // displayYard handles the video frame
+            displayYard(d.image);
+            // handleMotion checks d.motion flag — selalu dipanggil untuk update ratio
+            handleMotion(d);
+        }
         else if(d.type==='error'){
             setYardConn('offline');
             elYardStatus.innerHTML=`<i class="fas fa-times"></i>${d.message}`; } };
@@ -662,6 +998,10 @@ document.getElementById('btn-clear-motion').addEventListener('click', async()=>{
     elMotionLogList.innerHTML='';
     elMotionLogList.appendChild(elMotionEmpty);
     elMotionEmpty.style.display='';
+    // Reset counter
+    motionAlertCount = 0;
+    if (elMotionCount) elMotionCount.textContent = '0';
+    if (elMotionCountChip) elMotionCountChip.classList.add('hidden');
 });
 
 // ═════════════════════════════════════════════════════════════════════════════

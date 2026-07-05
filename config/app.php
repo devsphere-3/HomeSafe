@@ -22,7 +22,16 @@ return [
     | URL of the FastAPI backend running on the Raspberry Pi.
     | Set BACKEND_URL in your .env file.
     */
-    'backend_url' => env('BACKEND_URL', 'http://192.168.1.10:5001'),
+    'backend_url' => env('BACKEND_URL', 'http://172.20.10.3:5001'),
+
+    /*
+    |--------------------------------------------------------------------------
+    | Enroll Password
+    |--------------------------------------------------------------------------
+    | Password required to access the face enrollment page.
+    | Set ENROLL_PASSWORD in your .env file.
+    */
+    'enroll_password' => env('ENROLL_PASSWORD', 'homesafe123'),
 
     /*
     |--------------------------------------------------------------------------
