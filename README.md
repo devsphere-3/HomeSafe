@@ -619,4 +619,4 @@ MOTION_THRESHOLD = 0.02   # 2% = default
 
 ## Lisensi
 
-Proyek ini dibuat untuk keperluan akademik / tugas akhir.
+Proyek ini dibuat untuk keperluan Project Based Learning
