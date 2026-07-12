@@ -206,6 +206,10 @@
                     <i class="fas fa-video text-[11px]"></i>
                     <span class="hidden sm:inline">Monitoring</span>
                 </a>
+                <a href="{{ route('cameras') }}" class="nav-link {{ request()->routeIs('cameras') ? 'active' : '' }}">
+                    <i class="fas fa-expand text-[11px]"></i>
+                    <span class="hidden sm:inline">Live View</span>
+                </a>
                 <a href="{{ route('enroll') }}" class="nav-link {{ request()->routeIs('enroll') ? 'active' : '' }}">
                     <i class="fas fa-user-plus text-[11px]"></i>
                     <span class="hidden sm:inline">Enroll</span>
@@ -218,6 +222,13 @@
                     <i class="fas fa-clock-rotate-left text-[11px]"></i>
                     <span class="hidden sm:inline">Riwayat</span>
                 </a>
+                {{-- Database hanya lewat Ctrl+D — tidak tampil di navbar publik --}}
+                @if(request()->routeIs('database'))
+                <a href="{{ route('database') }}" class="nav-link active">
+                    <i class="fas fa-database text-[11px]"></i>
+                    <span class="hidden sm:inline">Database</span>
+                </a>
+                @endif
             </div>
 
             <!-- Theme toggle -->
@@ -256,14 +267,222 @@
             lightIcon.classList.toggle('hidden', !isDark);
             localStorage.setItem('hs-theme', t);
         }
-
-        // Init icon state
         applyTheme(localStorage.getItem('hs-theme') || 'dark');
-
         themeBtn.addEventListener('click', () => {
             const isDark = document.documentElement.classList.contains('dark');
             applyTheme(isDark ? 'light' : 'dark');
         });
+    </script>
+
+    <!-- ══════════════════════════════════════════════════════════════
+         ADMIN MODAL — Database Access (Ctrl+D)
+         Password disimpan di .env → ADMIN_DB_PASSWORD
+         ══════════════════════════════════════════════════════════════ -->
+    <style>
+        #admin-modal-backdrop {
+            position: fixed; inset: 0; z-index: 9999;
+            background: rgba(0,0,0,0.65);
+            backdrop-filter: blur(8px);
+            -webkit-backdrop-filter: blur(8px);
+            display: flex; align-items: center; justify-content: center;
+            opacity: 0; pointer-events: none;
+            transition: opacity 0.2s ease;
+        }
+        #admin-modal-backdrop.open { opacity: 1; pointer-events: auto; }
+
+        #admin-modal {
+            background: rgba(10,22,40,0.95);
+            border: 1px solid rgba(59,130,246,0.25);
+            border-radius: 18px;
+            padding: 2rem;
+            width: 100%; max-width: 380px;
+            box-shadow: 0 20px 60px rgba(0,0,0,0.6), 0 0 0 1px rgba(255,255,255,0.05);
+            transform: scale(0.95) translateY(8px);
+            transition: transform 0.2s ease;
+        }
+        #admin-modal-backdrop.open #admin-modal {
+            transform: scale(1) translateY(0);
+        }
+        html:not(.dark) #admin-modal {
+            background: rgba(220,228,240,0.97);
+            border-color: rgba(59,130,246,0.2);
+            box-shadow: 0 20px 60px rgba(15,23,42,0.25);
+        }
+
+        .admin-input {
+            width: 100%;
+            background: rgba(255,255,255,0.06);
+            border: 1px solid rgba(255,255,255,0.12);
+            border-radius: 10px;
+            padding: 0.65rem 1rem 0.65rem 2.5rem;
+            color: #f1f5f9;
+            font-size: 0.875rem;
+            font-family: inherit;
+            outline: none;
+            transition: border-color 0.15s;
+        }
+        html:not(.dark) .admin-input {
+            background: rgba(255,255,255,0.7);
+            border-color: rgba(148,163,184,0.3);
+            color: #0f172a;
+        }
+        .admin-input:focus { border-color: #3b82f6; }
+        .admin-input.error { border-color: #ef4444; }
+
+        .admin-btn {
+            width: 100%;
+            padding: 0.65rem;
+            border-radius: 10px;
+            font-size: 0.875rem; font-weight: 600;
+            cursor: pointer; border: none;
+            background: #3b82f6; color: #fff;
+            transition: background 0.15s, transform 0.1s;
+            font-family: inherit;
+        }
+        .admin-btn:hover { background: #2563eb; }
+        .admin-btn:active { transform: scale(0.98); }
+
+        .admin-hint {
+            font-size: 0.68rem; color: #475569; text-align: center; margin-top: 0.75rem;
+        }
+        html:not(.dark) .admin-hint { color: #64748b; }
+
+        /* shake animation on wrong password */
+        @keyframes adminShake {
+            0%,100%{transform:translateX(0)}
+            20%{transform:translateX(-8px)}
+            40%{transform:translateX(8px)}
+            60%{transform:translateX(-6px)}
+            80%{transform:translateX(6px)}
+        }
+        .admin-shake { animation: adminShake 0.4s ease; }
+    </style>
+
+    <!-- Modal HTML -->
+    <div id="admin-modal-backdrop" role="dialog" aria-modal="true" aria-labelledby="admin-modal-title">
+        <div id="admin-modal">
+            <!-- Header -->
+            <div class="flex items-center gap-3 mb-5">
+                <div class="w-10 h-10 rounded-xl bg-blue-500/15 border border-blue-500/25
+                            flex items-center justify-center flex-shrink-0">
+                    <i class="fas fa-database text-blue-400"></i>
+                </div>
+                <div>
+                    <p id="admin-modal-title" class="font-bold text-sm"
+                       style="color:#f1f5f9;">Panel Admin</p>
+                    <p class="text-xs" style="color:#64748b;">Akses Database HomeSafe</p>
+                </div>
+                <button id="admin-modal-close"
+                        class="ml-auto w-7 h-7 rounded-lg flex items-center justify-center
+                               text-slate-500 hover:text-slate-300 hover:bg-white/8 transition"
+                        aria-label="Tutup">
+                    <i class="fas fa-times text-xs"></i>
+                </button>
+            </div>
+
+            <!-- Form -->
+            <form id="admin-form" autocomplete="off" novalidate>
+                <div class="relative mb-3">
+                    <i class="fas fa-lock absolute left-3 top-1/2 -translate-y-1/2
+                               text-slate-500 text-xs pointer-events-none"></i>
+                    <input id="admin-password-input"
+                           type="password"
+                           class="admin-input"
+                           placeholder="Kata sandi admin…"
+                           aria-label="Kata sandi admin"
+                           autofocus />
+                </div>
+                <p id="admin-error-msg"
+                   class="text-xs text-red-400 mb-3 hidden flex items-center gap-1">
+                    <i class="fas fa-exclamation-circle"></i>
+                    <span>Kata sandi salah.</span>
+                </p>
+                <button type="submit" class="admin-btn">
+                    <i class="fas fa-arrow-right-to-bracket mr-1.5"></i>Masuk ke Database
+                </button>
+            </form>
+
+            <p class="admin-hint">
+                <i class="fas fa-keyboard mr-1"></i>
+                Tekan <kbd class="px-1.5 py-0.5 rounded bg-white/10 text-[10px] font-mono">Ctrl+D</kbd>
+                kapan saja untuk membuka panel ini
+            </p>
+        </div>
+    </div>
+
+    <script>
+    (() => {
+        // Password dikonfigurasi di .env → ADMIN_DB_PASSWORD
+        // Dikirim ke view via data attribute pada body agar tidak hardcode di JS
+        const ADMIN_PASSWORD = '{{ config("app.admin_db_password", env("ADMIN_DB_PASSWORD", "homesafe2026")) }}';
+        const DB_ROUTE       = '{{ route("database") }}';
+
+        const backdrop  = document.getElementById('admin-modal-backdrop');
+        const modal     = document.getElementById('admin-modal');
+        const form      = document.getElementById('admin-form');
+        const input     = document.getElementById('admin-password-input');
+        const errMsg    = document.getElementById('admin-error-msg');
+        const closeBtn  = document.getElementById('admin-modal-close');
+
+        function openModal() {
+            backdrop.classList.add('open');
+            input.value = '';
+            errMsg.classList.add('hidden');
+            input.classList.remove('error');
+            // sedikit delay agar transisi selesai dulu
+            setTimeout(() => input.focus(), 80);
+        }
+
+        function closeModal() {
+            backdrop.classList.remove('open');
+            input.value = '';
+        }
+
+        // Ctrl+D — buka modal dari mana saja
+        document.addEventListener('keydown', (e) => {
+            if (e.ctrlKey && e.key === 'd') {
+                e.preventDefault();   // cegah browser bookmark
+                // Kalau sudah di halaman database, tidak perlu modal
+                if (window.location.pathname === new URL(DB_ROUTE).pathname) return;
+                openModal();
+            }
+            if (e.key === 'Escape') closeModal();
+        });
+
+        // Tutup saat klik backdrop (di luar modal)
+        backdrop.addEventListener('click', (e) => {
+            if (e.target === backdrop) closeModal();
+        });
+
+        closeBtn.addEventListener('click', closeModal);
+
+        // Submit form
+        form.addEventListener('submit', (e) => {
+            e.preventDefault();
+            const val = input.value.trim();
+
+            if (val === ADMIN_PASSWORD) {
+                // Benar — navigasi ke database
+                closeModal();
+                window.location.href = DB_ROUTE;
+            } else {
+                // Salah — shake + pesan error
+                input.classList.add('error');
+                errMsg.classList.remove('hidden');
+                modal.classList.remove('admin-shake');
+                void modal.offsetWidth; // reflow untuk restart animasi
+                modal.classList.add('admin-shake');
+                input.select();
+                setTimeout(() => modal.classList.remove('admin-shake'), 500);
+            }
+        });
+
+        // Reset error saat mulai mengetik lagi
+        input.addEventListener('input', () => {
+            input.classList.remove('error');
+            errMsg.classList.add('hidden');
+        });
+    })();
     </script>
 
     @stack('scripts')

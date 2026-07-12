@@ -21,24 +21,43 @@ from threading import RLock   # ← RLock agar reentrant-safe
 logger = logging.getLogger(__name__)
 
 # ── Thresholds ─────────────────────────────────────────────────────────────────
-MATCH_THRESHOLD            = 0.40
-REJECTION_THRESHOLD        = 0.30
-DUPLICATE_REG_THRESHOLD    = 0.55
-REGISTRATION_FRAMES_REQUIRED = 10
-EMBEDDING_DIM              = 128
+#
+# SFace cosine similarity range: 0.0 (berbeda total) → 1.0 (identik persis)
+#
+#  Orang yang sama, kondisi ideal      : 0.75 – 0.95
+#  Orang yang sama, beda angle/cahaya  : 0.50 – 0.75
+#  Saudara kandung (mirip genetik)     : 0.30 – 0.50
+#  Orang tidak terkait                 : 0.00 – 0.30
+#
+MATCH_THRESHOLD      = 0.50   # Trigger match pada cosine ≥ 0.50 → tampil 90%+ di UI
+REJECTION_THRESHOLD  = 0.30   # Di bawah ini = Unknown mutlak
+
+# Enrollment duplicate guard
+DUPLICATE_REG_THRESHOLD      = 0.75  # Blokir hanya jika wajah benar-benar sama
+ENROLL_FACE_EXISTS_THRESHOLD = 0.70  # Per-frame check saat enroll
+
+# Jumlah frame enrollment — 15 cukup untuk rata-rata yang stabil
+REGISTRATION_FRAMES_REQUIRED = 15
+
+EMBEDDING_DIM = 128
 
 # Detection quality gates
-MIN_FACE_SIZE              = 40    # px — smaller = detect further away; was 60
+MIN_FACE_SIZE              = 40
 MAX_FACE_SIZE_RATIO        = 0.90
-MIN_DETECTION_CONFIDENCE   = 0.55  # slightly lower = faster, still reliable
+MIN_DETECTION_CONFIDENCE   = 0.50   # Sedikit lebih rendah → deteksi lebih cepat
 
 # Name validation
 MIN_NAME_LENGTH  = 2
 MAX_NAME_LENGTH  = 50
 VALID_NAME_PATTERN = re.compile(r"^[a-zA-Z0-9_\-\s]+$")
 
-# Detection downscale width — bigger = more accurate, slower; 256 is a good RPi sweet spot
+# Detection downscale width
 DETECT_WIDTH = 256
+
+# ── Kecepatan keputusan ────────────────────────────────────────────────────────
+# 1 = putuskan langsung di frame pertama cocok (paling responsif)
+# 2 = butuh 2 frame berturut-turut (lebih aman dari false-positive)
+CONSECUTIVE_MATCHES_REQUIRED = 1
 
 
 class FaceRecognizerEngine:
@@ -156,19 +175,19 @@ class FaceRecognizerEngine:
     def _rebuild_db_matrix(self):
         """
         Rebuild the vectorised (N, 128) search matrix from current self.database.
-        Must be called while holding db_lock (RLock allows re-entry from same thread).
-        Also safe to call without the lock during __init__ (single-threaded startup).
+        Rows are L2-normalised at build time so match_face/check_face_exists
+        can skip normalising the DB side on every call — just one dot product.
         """
-        # NOTE: caller is responsible for holding db_lock when calling this.
-        # We intentionally do NOT acquire it here to avoid double-lock confusion.
         if not self.database:
             self._db_names  = []
             self._db_matrix = None
             return
-        self._db_names  = list(self.database.keys())
-        self._db_matrix = np.vstack(
+        self._db_names = list(self.database.keys())
+        raw = np.vstack(
             [self.database[n].flatten() for n in self._db_names]
-        ).astype(np.float32)   # (N, 128)
+        ).astype(np.float32)                                    # (N, 128)
+        norms = np.linalg.norm(raw, axis=1, keepdims=True) + 1e-9
+        self._db_matrix = raw / norms                          # pre-normalised (N, 128)
 
     # ── Name validation ────────────────────────────────────────────────────────
 
@@ -190,27 +209,35 @@ class FaceRecognizerEngine:
             return False, "invalid_embedding"
 
         with self.db_lock:
-            # Duplicate check — only if DB has entries
-            if self._db_matrix is not None:
-                _, score, _ = self._match_vectorised(embedding)
-                if score >= DUPLICATE_REG_THRESHOLD:
-                    idx = int(np.argmax(self._cosine_scores(embedding)))
-                    dup = self._db_names[idx]
-                    if dup != name:
-                        logger.warning(f"Duplicate: '{name}' ≈ '{dup}'")
-                        return False, f"duplicate:{dup}"
+            # ── Cek nama sudah dipakai ─────────────────────────────────────────
+            if name in self.database:
+                return False, "name_taken"
 
-            # Write to in-memory DB and persist to disk — all inside the same lock
+            # ── Cek wajah sudah terdaftar (dengan nama apapun) ─────────────────
+            if self._db_matrix is not None:
+                scores     = self._cosine_scores(embedding)
+                best_idx   = int(np.argmax(scores))
+                best_score = float(scores[best_idx])
+                best_name  = self._db_names[best_idx]
+
+                # Tolak hanya jika wajah benar-benar sama (di atas DUPLICATE_REG_THRESHOLD).
+                # Threshold sengaja lebih tinggi dari MATCH_THRESHOLD (0.60) agar
+                # wajah orang berbeda yang punya kemiripan sedang tetap bisa mendaftar.
+                if best_score >= DUPLICATE_REG_THRESHOLD and best_name != name:
+                    logger.warning(
+                        f"❌ Enroll ditolak: wajah '{name}' sudah terdaftar "
+                        f"sebagai '{best_name}' (score={best_score:.3f})"
+                    )
+                    return False, f"face_exists:{best_name}"
+
+            # ── Tulis ke DB ────────────────────────────────────────────────────
             self.database[name] = embedding
-            ok = self._save_database()   # writes database.json
+            ok = self._save_database()
 
             if not ok:
-                # Roll back in-memory change if disk write failed
                 self.database.pop(name, None)
                 return False, "save_error"
 
-            # Rebuild search matrix while still holding the lock
-            # (RLock allows re-entry from the same thread)
             self._rebuild_db_matrix()
 
         logger.info(f"✅ User '{name}' registered — DB now has {len(self.database)} user(s)")
@@ -228,6 +255,44 @@ class FaceRecognizerEngine:
 
     def get_users_list(self) -> list:
         return list(self.database.keys())
+
+    def check_face_exists(self, embedding: np.ndarray) -> tuple[bool, str, float]:
+        """
+        Cek apakah embedding wajah sudah ada di database.
+        Dipanggil per-frame SEBELUM embedding dikumpulkan untuk enroll,
+        sehingga pengguna langsung mendapat feedback tanpa harus menunggu
+        semua frame selesai.
+
+        Returns:
+            (exists: bool, matched_name: str, score: float)
+            exists=True  → wajah sudah terdaftar, tolak pendaftaran
+            exists=False → wajah belum terdaftar, boleh lanjut
+        """
+        if embedding is None:
+            return False, "", 0.0
+
+        with self.db_lock:
+            if self._db_matrix is None or len(self._db_names) == 0:
+                return False, "", 0.0
+            db_matrix = self._db_matrix
+            db_names  = list(self._db_names)
+
+        # Normalisasi query sebelum dot product dengan DB yang sudah pre-normalised
+        q = embedding.flatten().astype(np.float32)
+        q_norm = q / (np.linalg.norm(q) + 1e-9)
+        scores = db_matrix @ q_norm
+
+        best_idx   = int(np.argmax(scores))
+        best_score = float(scores[best_idx])
+        best_name  = db_names[best_idx]
+
+        if best_score >= ENROLL_FACE_EXISTS_THRESHOLD:
+            logger.debug(
+                f"check_face_exists: match '{best_name}' score={best_score:.3f}"
+            )
+            return True, best_name, best_score
+
+        return False, "", best_score
 
     # ── Detection ──────────────────────────────────────────────────────────────
 
@@ -319,10 +384,14 @@ class FaceRecognizerEngine:
     # ── Embedding ──────────────────────────────────────────────────────────────
 
     def get_embedding(self, frame: np.ndarray, face_info: np.ndarray) -> np.ndarray | None:
-        """Align + crop face, then extract 128-d embedding with SFace."""
+        """Align + crop face, then extract 128-d L2-normalised embedding with SFace."""
         try:
             aligned = self.face_recognizer.alignCrop(frame, face_info)
-            return self.face_recognizer.feature(aligned)  # (1, 128)
+            raw = self.face_recognizer.feature(aligned)          # (1, 128)
+            # Pre-normalise at extraction time → match_face / check_face_exists
+            # only need one dot product per call, no division at all.
+            norm = np.linalg.norm(raw) + 1e-9
+            return (raw / norm).astype(np.float32)               # (1, 128) unit-norm
         except Exception as e:
             logger.error(f"Embedding error: {e}")
             return None
@@ -331,73 +400,70 @@ class FaceRecognizerEngine:
 
     def _cosine_scores(self, embedding: np.ndarray) -> np.ndarray:
         """
-        Compute cosine similarity between embedding and ALL DB entries at once.
-        Returns 1-D array of shape (N,) using pure numpy — no Python loop.
+        Cosine similarity antara embedding query dan seluruh DB matrix.
+        DB matrix sudah pre-normalised. Embedding query dinormalisasi di sini.
 
-        Cosine similarity = dot(a, b) / (|a| * |b|)
-        Both embedding and DB rows are already L2-normalised by SFace, so
-        cosine sim == dot product.
+        embedding : (1, 128) atau (128,) float32
+        Returns   : (N,) float32 similarity scores
         """
-        q = embedding.flatten().astype(np.float32)         # (128,)
+        q = embedding.flatten().astype(np.float32)
         q_norm = q / (np.linalg.norm(q) + 1e-9)
-
-        # _db_matrix: (N, 128) — rows already unit-normed from SFace feature()
-        norms = np.linalg.norm(self._db_matrix, axis=1, keepdims=True) + 1e-9
-        db_normed = self._db_matrix / norms                # (N, 128)
-
-        scores = db_normed @ q_norm                        # (N,) — one matmul
-        return scores
-
-    def _match_vectorised(self, embedding: np.ndarray) -> tuple[str, float, float]:
-        """Return (best_name, best_score, percentage) using vectorised cosine."""
-        scores    = self._cosine_scores(embedding)
-        best_idx  = int(np.argmax(scores))
-        best_score = float(scores[best_idx])
-        best_name  = self._db_names[best_idx]
-        pct        = self._score_to_pct(best_score)
-        return best_name, best_score, pct
+        return self._db_matrix @ q_norm    # (N, 128) @ (128,) → (N,)
 
     @staticmethod
     def _score_to_pct(score: float) -> float:
-        """Map cosine score → human-readable 0-100 percentage."""
+        """
+        Map cosine similarity → persentase yang ditampilkan di UI.
+
+        Skala:
+          score < 0.30              → 0%        (Unknown mutlak)
+          score 0.30 – 0.50         → 0 – 89%   (zona abu-abu, belum match)
+          score = 0.50  (threshold) → 90%       (batas minimum match)
+          score 0.50 – 1.00         → 90 – 100% (match zona hijau)
+
+        Ini membuat angka di UI selalu ≥ 90% ketika wajah dikenali.
+        """
         if score <= 0:
             return 0.0
         if score >= 1.0:
             return 100.0
         if score < MATCH_THRESHOLD:
-            return round(score / MATCH_THRESHOLD * 79.0, 1)
-        return round(80.0 + (score - MATCH_THRESHOLD) / (1.0 - MATCH_THRESHOLD) * 20.0, 1)
+            # Zona abu-abu: 0 → 89%
+            return round(score / MATCH_THRESHOLD * 89.0, 1)
+        # Zona match: 90 → 100%
+        return round(90.0 + (score - MATCH_THRESHOLD) / (1.0 - MATCH_THRESHOLD) * 10.0, 1)
 
     def match_face(self, embedding: np.ndarray) -> tuple[str, float, float]:
         """
-        Public match API — takes a thread-safe snapshot of the DB matrix,
-        then runs vectorised cosine search outside the lock.
+        Public match API — thread-safe snapshot then vectorised cosine search.
+        embedding is expected to be already L2-normalised (from get_embedding).
         Returns (name, cosine_score, percentage).
         """
         if embedding is None:
             return "Unknown", 0.0, 0.0
 
-        # Snapshot under lock so a concurrent register doesn't corrupt the search
         with self.db_lock:
             if self._db_matrix is None:
                 return "Unknown", 0.0, 0.0
-            # Cheap copy — just a reference to an immutable array built in _rebuild
             db_matrix = self._db_matrix
             db_names  = list(self._db_names)
 
-        # Heavy cosine math outside the lock
-        q      = embedding.flatten().astype(np.float32)
+        # Normalisasi query, DB sudah pre-normalised
+        q = embedding.flatten().astype(np.float32)
         q_norm = q / (np.linalg.norm(q) + 1e-9)
-        norms  = np.linalg.norm(db_matrix, axis=1, keepdims=True) + 1e-9
-        scores = (db_matrix / norms) @ q_norm   # (N,)
+        scores = db_matrix @ q_norm       # (N,)
 
         best_idx   = int(np.argmax(scores))
         best_score = float(scores[best_idx])
         best_name  = db_names[best_idx]
         pct        = self._score_to_pct(best_score)
 
+        # Log setiap frame agar mudah debug threshold
+        logger.debug(f"match_face: best='{best_name}' score={best_score:.4f} threshold={MATCH_THRESHOLD}")
+
         if best_score < REJECTION_THRESHOLD:
             return "Unknown", best_score, 0.0
         if best_score < MATCH_THRESHOLD:
+            logger.debug(f"Near-miss: '{best_name}' score={best_score:.4f} (threshold {MATCH_THRESHOLD})")
             return "Unknown", best_score, pct
         return best_name, best_score, pct

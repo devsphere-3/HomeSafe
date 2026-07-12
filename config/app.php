@@ -35,6 +35,15 @@ return [
 
     /*
     |--------------------------------------------------------------------------
+    | Admin Database Password
+    |--------------------------------------------------------------------------
+    | Password untuk mengakses halaman Database via modal admin (Ctrl+D).
+    | Set ADMIN_DB_PASSWORD di .env — jangan gunakan password default di produksi.
+    */
+    'admin_db_password' => env('ADMIN_DB_PASSWORD', 'homesafe2026'),
+
+    /*
+    |--------------------------------------------------------------------------
     | Application Environment
     |--------------------------------------------------------------------------
     |

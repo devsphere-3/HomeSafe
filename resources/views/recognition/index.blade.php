@@ -381,7 +381,7 @@ html:not(.dark) .history-card, html:not(.dark) .motion-card {
                 <div id="motion-flash"></div>
                 <span id="motion-alert-badge" class="badge-alert hidden">
                     <span class="status-badge red" style="animation: pulse 1s infinite;">
-                        <i class="fas fa-exclamation-triangle"></i>ALERT
+                        <i class="fas fa-walking"></i>Ada Tamu!
                     </span>
                 </span>
             </div>
@@ -499,8 +499,12 @@ const elNote    = document.getElementById('cam-selector-note');
 let ws = null, wsMotion = null;
 let rcTimer = null, rcMotionTimer = null;
 let rcAttempts = 0, rcMotionAttempts = 0;
-let sessionLocked = false, lastResult = null;
+let lastResult = null;
 let motionAlertCount = 0;   // counter total alert gerakan di sesi ini
+
+// Cooldown: cegah notifikasi "ada tamu" berulang dalam X detik
+const MOTION_COOLDOWN_MS = 8000;  // 8 detik jeda antar notifikasi
+let lastMotionAlertAt    = 0;
 
 // Auto-reload: restart session if no face detected for 3 seconds
 let noFaceTimer = null;
@@ -512,12 +516,10 @@ function resetNoFaceTimer() {
 }
 
 function startNoFaceTimer() {
-    if (sessionLocked || noFaceTimer) return;
+    if (noFaceTimer) return;
     noFaceTimer = setTimeout(() => {
         noFaceTimer = null;
-        if (!sessionLocked) {
-            restartSession();
-        }
+        restartSession();
     }, NO_FACE_TIMEOUT);
 }
 </script>
@@ -800,7 +802,6 @@ function cancelAutoRestart() {
 }
 
 function handleUnlocked(data){
-    sessionLocked=true;
     resetNoFaceTimer();
     elUnlockName.textContent=data.name;
     elUnlockPct.textContent=`Kecocokan: ${Math.round(data.percentage)}%`;
@@ -809,14 +810,14 @@ function handleUnlocked(data){
     elStatus.className='status-badge green';
     elStatus.innerHTML='<i class="fas fa-check-circle"></i>Access Granted';
 
-    // After 3.2 s: hide ACCESS GRANTED, show countdown overlay, begin auto-restart
+    // Setelah 3 detik: sembunyikan overlay ACCESS GRANTED, lanjut scanning
+    // TIDAK tutup WS, TIDAK restart session — stream terus berjalan
     setTimeout(() => {
         elUnlockOvr.classList.remove('show');
-        elCamOff.classList.add('show');
-        elBtnRestart.classList.remove('hidden');
-        ws?.close();
-        startAutoRestart();
-    }, 3200);
+        setLock(false);
+        elStatus.className='status-badge green';
+        elStatus.innerHTML='<i class="fas fa-circle"></i>Terhubung — Scanning…';
+    }, 3000);
 
     addHistCard(data);
 }
@@ -842,7 +843,7 @@ async function loadHistory(){
 }
 
 function restartSession(){
-    sessionLocked=false; lastResult=null;
+    lastResult=null;
     resetNoFaceTimer();
     cancelAutoRestart();
     elCamOff.classList.remove('show'); elUnlockOvr.classList.remove('show');
@@ -883,7 +884,7 @@ function startSession(){
         else if(d.type==='error'){
             elStatus.className='status-badge red';
             elStatus.innerHTML=`<i class="fas fa-times-circle"></i>${d.message}`; } };
-    ws.onclose=()=>{ setConn('offline'); if(sessionLocked) return;
+    ws.onclose=()=>{ setConn('offline');
         elStatus.className='status-badge red';
         elStatus.innerHTML='<i class="fas fa-times"></i>Terputus';
         rcAttempts++;
@@ -908,30 +909,41 @@ function displayYard(b64){
 }
 
 function handleMotion(data){
-    // ✅ FIX: motion_ratio dari backend sudah dalam persen (0-100), tidak perlu *100 lagi
+    // motion_ratio dari backend sudah dalam persen (0-100)
     const ratio = data.motion_ratio || 0;
     elMotionRatio.textContent = ratio.toFixed(1) + '%';
 
     if(data.motion){
+        const now = Date.now();
+        // Cooldown: tampilkan flash border setiap frame, tapi notifikasi log + badge
+        // hanya dikirim sekali per MOTION_COOLDOWN_MS agar tidak spam
         elMotionFlash.classList.add('active');
         clearTimeout(motionFlashTimer);
-        motionFlashTimer=setTimeout(()=>elMotionFlash.classList.remove('active'),800);
-        elMotionBadge.classList.remove('hidden');
-        elMotionChip.className='status-badge red';
-        elMotionChip.innerHTML='<i class="fas fa-exclamation-triangle"></i><span class="font-semibold">ALERT</span>';
+        motionFlashTimer = setTimeout(() => elMotionFlash.classList.remove('active'), 800);
 
-        // Update motion counter
-        motionAlertCount++;
-        if (elMotionCount) elMotionCount.textContent = motionAlertCount;
-        if (elMotionCountChip) elMotionCountChip.classList.remove('hidden');
+        if (now - lastMotionAlertAt >= MOTION_COOLDOWN_MS) {
+            lastMotionAlertAt = now;
 
-        clearTimeout(window._mbTimer);
-        window._mbTimer=setTimeout(()=>{
-            elMotionBadge.classList.add('hidden');
-            elMotionChip.className='status-badge green';
-            elMotionChip.innerHTML='<i class="fas fa-eye"></i><span>Memantau</span>';
-        },5000);
-        addMotionCard(data);
+            // Badge ALERT di feed
+            elMotionBadge.classList.remove('hidden');
+            elMotionChip.className = 'status-badge red';
+            elMotionChip.innerHTML = '<i class="fas fa-walking"></i><span class="font-semibold">Ada Tamu!</span>';
+
+            // Update counter
+            motionAlertCount++;
+            if (elMotionCount) elMotionCount.textContent = motionAlertCount;
+            if (elMotionCountChip) elMotionCountChip.classList.remove('hidden');
+
+            clearTimeout(window._mbTimer);
+            window._mbTimer = setTimeout(() => {
+                elMotionBadge.classList.add('hidden');
+                elMotionChip.className = 'status-badge green';
+                elMotionChip.innerHTML = '<i class="fas fa-eye"></i><span>Memantau</span>';
+            }, 5000);
+
+            // Tambah ke log — hanya saat cooldown selesai
+            addMotionCard(data);
+        }
     }
 }
 
@@ -940,14 +952,13 @@ function addMotionCard(data){
     const c=document.createElement('div');
     c.className='motion-card alert';
     const ts=new Date().toLocaleTimeString('id-ID',{hour:'2-digit',minute:'2-digit',second:'2-digit'});
-    // ✅ FIX: motion_ratio sudah dalam persen dari backend
     const ratio = (data.motion_ratio||0).toFixed(1);
     c.innerHTML=`<div class="flex-1 min-w-0">
-      <div class="text-xs font-semibold text-red-400">
-        <i class="fas fa-exclamation-triangle mr-1"></i>Gerakan Terdeteksi
+      <div class="text-xs font-semibold text-amber-400">
+        <i class="fas fa-walking mr-1"></i>Ada Tamu Datang
       </div>
-      <div class="text-xs text-gray-500">${ts} · ${ratio}% area</div>
-    </div><i class="fas fa-bell text-red-400 text-sm flex-shrink-0"></i>`;
+      <div class="text-xs text-gray-500">${ts} · ${ratio}% area bergerak</div>
+    </div><i class="fas fa-person-walking text-amber-400 text-sm flex-shrink-0"></i>`;
     elMotionLogList.insertBefore(c, elMotionLogList.firstChild);
     while(elMotionLogList.children.length>50) elMotionLogList.lastChild.remove();
 }

@@ -36,6 +36,7 @@ from recognizer import (
     FaceRecognizerEngine,
     MATCH_THRESHOLD,
     REGISTRATION_FRAMES_REQUIRED,
+    CONSECUTIVE_MATCHES_REQUIRED,
 )
 
 # ── GPIO — deteksi platform ───────────────────────────────────────────────────
@@ -199,29 +200,64 @@ _yard_running   = threading.Event()
 
 
 def _is_capture_node(video_path: str) -> bool:
-    """Cek apakah V4L2 node adalah capture node (bukan metadata)."""
+    """
+    Cek apakah V4L2 node adalah USB capture node yang bisa dipakai OpenCV.
+
+    Filter berlapis:
+    1. VIDIOC_QUERYCAP — harus punya flag VIDEO_CAPTURE
+    2. Driver check — node ISP/metadata Pi (bcm2835-isp, unicam, rp1-cfe)
+       lolos cap flag tapi tidak bisa di-capture oleh OpenCV → dibuang
+    3. Index guard — node video10+ pada Pi umumnya ISP pipeline, bukan USB
+    """
     import fcntl, struct
-    VIDIOC_QUERYCAP = 0x80685600
+
+    # Node ≥ video10 di Pi hampir selalu ISP/metadata pipeline, bukan USB webcam
+    try:
+        idx = int(video_path.replace("/dev/video", ""))
+        if idx >= 10:
+            return False
+    except ValueError:
+        return False
+
+    VIDIOC_QUERYCAP        = 0x80685600
+    V4L2_CAP_VIDEO_CAPTURE = 0x00000001
+
+    # Driver yang diketahui bukan USB capture
+    BLOCKED_DRIVERS = {b"bcm2835-isp", b"unicam", b"rp1-cfe", b"bcm2835-v4l2"}
+
     try:
         with open(video_path, "rb") as f:
-            buf = b"\x00" * 104
+            buf    = b"\x00" * 104
             result = fcntl.ioctl(f, VIDIOC_QUERYCAP, buf)
-            caps = struct.unpack_from("<I", result, 64)[0]
-            return bool(caps & 0x00000001)
+            caps   = struct.unpack_from("<I", result, 64)[0]
+            if not (caps & V4L2_CAP_VIDEO_CAPTURE):
+                return False
+            # Cek nama driver (byte 0–15)
+            driver = result[:16].rstrip(b"\x00")
+            if driver in BLOCKED_DRIVERS:
+                return False
+        return True
     except Exception:
         return False
 
 
 def _open_cap(cam_id: int, width: int = STREAM_W, height: int = STREAM_H) -> cv2.VideoCapture | None:
-    """Buka kamera via path langsung — hindari obsensor noise dari CAP_ANY."""
+    """
+    Buka kamera via path langsung.
+    - Gunakan path /dev/videoX (lebih andal dari integer index)
+    - Hanya CAP_V4L2 — hindari obsensor/ISP backend
+    - Lewati node yang tidak lolos _is_capture_node (video10+ Pi ISP)
+    """
     import glob
     video_nodes   = sorted(glob.glob("/dev/video*"))
     matching_path = f"/dev/video{cam_id}"
 
+    # Gunakan path string jika node valid, fallback ke integer hanya jika tidak ada
     if matching_path in video_nodes and _is_capture_node(matching_path):
         candidates: list[tuple] = [(matching_path, cv2.CAP_V4L2)]
     else:
-        candidates = [(cam_id, cv2.CAP_V4L2), (cam_id, cv2.CAP_ANY)]
+        logger.warning(f"Camera {cam_id}: path {matching_path} tidak valid, coba integer index")
+        candidates = [(cam_id, cv2.CAP_V4L2)]
 
     for src, backend in candidates:
         cap = cv2.VideoCapture(src, backend)
@@ -478,17 +514,20 @@ async def _recognition_worker(
     unlock_event: asyncio.Event,
 ):
     loop      = asyncio.get_event_loop()
-    skip_next = False
 
-    while not stop_event.is_set() and not unlock_event.is_set():
-        if skip_next:
-            await asyncio.sleep(0.05)
-            skip_next = False
-            continue
+    # Cooldown setelah unlock — cegah trigger servo berulang
+    UNLOCK_COOLDOWN = 10.0
+    last_unlock_at: dict[str, float] = {}
 
+    # Consecutive-match counter: butuh N frame berturut-turut cocok sebelum unlock
+    # Mengurangi false positive tanpa menambah latency signifikan
+    consecutive: dict[str, int] = {}   # name → hit count
+    REQUIRED = CONSECUTIVE_MATCHES_REQUIRED   # dari recognizer.py (default 2)
+
+    while not stop_event.is_set():
         frame = _get_door_frame()
         if frame is None:
-            await asyncio.sleep(0.05)
+            await asyncio.sleep(0.02)
             continue
 
         t0 = time.perf_counter()
@@ -513,7 +552,24 @@ async def _recognition_worker(
                 )
                 matched = similarity >= MATCH_THRESHOLD
 
+        # Reset consecutive counter jika wajah hilang atau berbeda
+        if not matched:
+            consecutive.clear()
+        else:
+            consecutive[match_name] = consecutive.get(match_name, 0) + 1
+            # Hapus counter nama lain (hanya 1 wajah di frame)
+            for k in list(consecutive):
+                if k != match_name:
+                    del consecutive[k]
+
         elapsed_ms = (time.perf_counter() - t0) * 1000
+
+        # Cek apakah wajah ini sedang dalam cooldown (baru saja dibuka)
+        now = time.monotonic()
+        in_cooldown = matched and (now - last_unlock_at.get(match_name, 0) < UNLOCK_COOLDOWN)
+
+        # Unlock hanya jika consecutive hits sudah cukup DAN tidak dalam cooldown
+        do_unlock = matched and not in_cooldown and consecutive.get(match_name, 0) >= REQUIRED
 
         result = {
             "type":            "result",
@@ -526,14 +582,16 @@ async def _recognition_worker(
             "similarity":      float(similarity),
             "percentage":      float(match_percentage),
             "process_time_ms": round(elapsed_ms, 2),
-            "unlocked":        matched,
+            "unlocked":        do_unlock,
         }
         try:
             result_queue.put_nowait(result)
         except asyncio.QueueFull:
             pass
 
-        if matched:
+        if do_unlock:
+            last_unlock_at[match_name] = now
+            consecutive.clear()          # reset setelah trigger
             unlock_event.set()
             trigger_unlock_servo(match_name)
 
@@ -557,41 +615,60 @@ async def _recognition_worker(
                     pass
 
             logger.info(f"🔓 Access granted: {match_name} ({match_percentage:.1f}%)")
-            return
 
-        if elapsed_ms > 200:
-            skip_next = True
+        # Beri napas event loop tanpa skip frame:
+        # Jika proses lambat (>80 ms) yield sedikit lebih lama agar tasks lain jalan.
+        # Jika cepat, langsung lanjut — tidak ada artificial delay.
+        if elapsed_ms < 50:
+            await asyncio.sleep(0)          # yield satu tick, segera kembali
+        elif elapsed_ms < 150:
+            await asyncio.sleep(0.005)
         else:
-            await asyncio.sleep(0.01)
+            await asyncio.sleep(0.02)
 
 # ─────────────────────────────────────────────────────────────────────────────
 # CAMERA MANAGEMENT API
 # ─────────────────────────────────────────────────────────────────────────────
 
 def _list_cameras_sync() -> list:
+    """
+    Enumerate hanya USB capture node yang bisa dipakai OpenCV.
+    Node Pi ISP (video10+, bcm2835-isp, unicam) dilewati otomatis
+    oleh _is_capture_node sehingga tidak ada timeout warning.
+    """
     import glob
+    # Suppress OpenCV V4L2 warning saat probe kamera
+    prev_log = cv2.getLogLevel()
+    cv2.setLogLevel(0)   # 0 = silent
     result = []
-    for node in sorted(glob.glob("/dev/video*")):
-        try:
-            idx = int(node.replace("/dev/video", ""))
-        except ValueError:
-            continue
-        avail = _is_capture_node(node)
-        entry = {"id": idx, "node": node, "name": f"USB Camera {idx}",
-                 "available": avail, "resolution": "—"}
-        if avail:
+    try:
+        for node in sorted(glob.glob("/dev/video*")):
+            try:
+                idx = int(node.replace("/dev/video", ""))
+            except ValueError:
+                continue
+
+            # _is_capture_node sudah filter node ISP/metadata — tidak ada timeout
+            if not _is_capture_node(node):
+                continue
+
+            entry = {"id": idx, "node": node, "name": f"USB Camera {idx}",
+                     "available": False, "resolution": "—"}
+
             cap = cv2.VideoCapture(node, cv2.CAP_V4L2)
             if cap.isOpened():
                 ret, _ = cap.read()
                 if ret:
+                    entry["available"]  = True
                     entry["resolution"] = (
                         f"{int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))}"
                         f"x{int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))}"
                     )
                 cap.release()
-            else:
-                entry["available"] = False
-        result.append(entry)
+
+            result.append(entry)
+    finally:
+        cv2.setLogLevel(prev_log)   # kembalikan log level ke semula
     return result
 
 
@@ -640,7 +717,36 @@ async def select_camera_legacy(camera_id: int):
 
 @app.get("/api/users")
 async def get_users():
+    """
+    Kembalikan daftar nama pengguna terdaftar dari in-memory database.
+    Setelah enroll selesai, engine sudah langsung update _db_matrix —
+    tidak perlu restart atau reload apapun.
+    """
     return {"users": engine.get_users_list()}
+
+
+@app.get("/api/users/detail")
+async def get_users_detail():
+    """
+    Detail lengkap semua profil wajah terdaftar dari database.json Pi.
+    Laravel bisa fetch ini langsung — tidak perlu copy file JSON ke mana-mana.
+    """
+    import glob
+    with engine.db_lock:
+        names = list(engine.database.keys())
+
+    result = []
+    for i, name in enumerate(names):
+        result.append({
+            "id":    i + 1,
+            "name":  name,
+            "node":  "database.json",
+        })
+    return {
+        "profiles": result,
+        "total":    len(result),
+        "source":   "raspberry_pi_local",
+    }
 
 
 @app.delete("/api/users/{name}")
@@ -698,21 +804,22 @@ async def websocket_recognition(websocket: WebSocket):
                 b64 = await loop.run_in_executor(_thread_pool, _encode_jpeg, frame, 50)
                 await websocket.send_json({"type": "frame", "image": b64})
                 last = time.monotonic()
-            except Exception as e:
-                logger.error(f"door frame_sender: {e}"); break
+            except Exception:
+                # Koneksi tutup — keluar tanpa log noise
+                break
 
     async def result_sender():
         while not stop_event.is_set():
             try:
                 result = await asyncio.wait_for(result_queue.get(), timeout=1.0)
                 await websocket.send_json(result)
-                if result.get("type") == "unlocked_final":
-                    await asyncio.sleep(3.0)
-                    stop_event.set(); break
+                # TIDAK stop setelah unlocked_final — biarkan stream terus berjalan
+                # Frontend menampilkan overlay sementara lalu lanjut scanning sendiri
             except asyncio.TimeoutError:
                 continue
-            except Exception as e:
-                logger.error(f"result_sender: {e}"); break
+            except Exception:
+                # Koneksi tutup — keluar tanpa log noise
+                break
 
     async def keepalive():
         while not stop_event.is_set():
@@ -736,14 +843,20 @@ async def websocket_recognition(websocket: WebSocket):
                     continue
             except asyncio.TimeoutError:
                 continue
+            except (WebSocketDisconnect, RuntimeError):
+                # Browser tutup koneksi atau WS belum/sudah closed — keluar normal
+                break
     except WebSocketDisconnect:
-        logger.info("Recognition WS disconnected")
+        pass
     except Exception as e:
-        logger.error(f"Recognition WS error: {e}", exc_info=True)
+        # Hanya log error yang benar-benar tidak terduga
+        if "accept" not in str(e).lower() and "close" not in str(e).lower():
+            logger.error(f"Recognition WS error: {e}", exc_info=True)
     finally:
         stop_event.set()
         for t in tasks:
             t.cancel()
+        logger.info("Recognition WS disconnected")
 
 # ─────────────────────────────────────────────────────────────────────────────
 # WEBSOCKET — Enrollment  (/ws/enroll)
@@ -828,6 +941,32 @@ async def websocket_enrollment(websocket: WebSocket):
                     _thread_pool, engine.get_embedding, frame, face_info
                 )
                 if embedding is None: continue
+
+                # ── CEK WAJAH SUDAH TERDAFTAR (per-frame, sebelum dikumpulkan) ──
+                # Pengecekan ini berjalan setiap frame agar pengguna langsung
+                # mendapat feedback tanpa menunggu semua frame selesai.
+                exists, existing_name, score = await loop.run_in_executor(
+                    _thread_pool, engine.check_face_exists, embedding
+                )
+                if exists:
+                    is_scanning    = False
+                    reg_embeddings = []
+                    pct = engine._score_to_pct(score)
+                    logger.warning(
+                        f"❌ [ENROLL] Wajah '{reg_name}' diblokir — "
+                        f"sudah terdaftar sebagai '{existing_name}' (score={score:.3f})"
+                    )
+                    await websocket.send_json({
+                        "type":    "register_error",
+                        "message": (
+                            f"Wajah ini sudah terdaftar sebagai '{existing_name}' "
+                            f"({round(pct, 1)}% kemiripan). "
+                            f"1 wajah hanya boleh untuk 1 akun."
+                        ),
+                    })
+                    continue
+                # ─────────────────────────────────────────────────────────────────
+
                 reg_embeddings.append(embedding)
                 progress = int(len(reg_embeddings) * 100 / REGISTRATION_FRAMES_REQUIRED)
                 await websocket.send_json({
@@ -846,21 +985,25 @@ async def websocket_enrollment(websocket: WebSocket):
                         await websocket.send_json({"type": "register_error",
                             "message": f"Nama '{reg_name}' sudah terdaftar."})
                     elif reason.startswith("face_exists:"):
+                        existing = reason.split(":", 1)[1]
                         await websocket.send_json({"type": "register_error",
-                            "message": f"Wajah sudah terdaftar sebagai '{reason.split(':',1)[1]}'."})
+                            "message": f"Wajah ini sudah terdaftar sebagai '{existing}'. "
+                                       f"1 wajah hanya boleh untuk 1 akun."})
                     elif reason.startswith("duplicate:"):
+                        dup = reason.split(":", 1)[1]
                         await websocket.send_json({"type": "register_error",
-                            "message": f"Wajah terlalu mirip dengan '{reason.split(':',1)[1]}'."})
+                            "message": f"Wajah terlalu mirip dengan profil '{dup}'."})
                     else:
                         await websocket.send_json({"type": "register_error",
                             "message": f"Pendaftaran gagal ({reason})."})
-
     except WebSocketDisconnect:
-        logger.info("Enrollment WS disconnected")
+        pass
     except Exception as e:
-        logger.error(f"Enrollment WS error: {e}", exc_info=True)
+        if "accept" not in str(e).lower() and "close" not in str(e).lower():
+            logger.error(f"Enrollment WS error: {e}", exc_info=True)
     finally:
         stop_event.set(); frame_task.cancel()
+        logger.info("Enrollment WS disconnected")
 
 # ─────────────────────────────────────────────────────────────────────────────
 # WEBSOCKET — Motion Detection CCTV  (/ws/motion)
@@ -925,8 +1068,8 @@ async def websocket_motion(websocket: WebSocket):
                     "motion_ratio": round(ratio * 100, 2),
                 })
                 last = time.monotonic()
-            except Exception as e:
-                logger.error(f"motion_sender: {e}"); break
+            except Exception:
+                break
 
     async def keepalive():
         while not stop_event.is_set():
@@ -948,14 +1091,17 @@ async def websocket_motion(websocket: WebSocket):
                     continue
             except asyncio.TimeoutError:
                 continue
+            except (WebSocketDisconnect, RuntimeError):
+                break
     except WebSocketDisconnect:
-        logger.info("Motion WS disconnected")
-    except Exception as e:
-        logger.error(f"Motion WS error: {e}", exc_info=True)
+        pass
+    except Exception:
+        pass
     finally:
         stop_event.set()
         for t in tasks:
             t.cancel()
+        logger.info("Motion WS disconnected")
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -966,4 +1112,15 @@ if __name__ == "__main__":
     print("=" * 55)
     print("  Smart Lock API — http://0.0.0.0:5001")
     print("=" * 55)
-    uvicorn.run("app:app", host="0.0.0.0", port=5001, log_level="info")
+    uvicorn.run(
+        "app:app",
+        host="0.0.0.0",
+        port=5001,
+        log_level="info",
+        # Matikan ping internal uvicorn — kita handle keepalive sendiri
+        # Ini menghilangkan "keepalive ping failed / AssertionError"
+        ws_ping_interval=None,
+        ws_ping_timeout=None,
+        # Izinkan frame video besar (max 8MB per pesan WS)
+        ws_max_size=8 * 1024 * 1024,
+    )

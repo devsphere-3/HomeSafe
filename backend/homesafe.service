@@ -1,0 +1,35 @@
+# ─────────────────────────────────────────────────────────────────────────────
+# HomeSafe systemd service — auto-start saat Raspberry Pi boot
+#
+# Install:
+#   sudo cp homesafe.service /etc/systemd/system/
+#   sudo systemctl daemon-reload
+#   sudo systemctl enable homesafe
+#   sudo systemctl start homesafe
+#
+# Logs:
+#   sudo journalctl -u homesafe -f
+# ─────────────────────────────────────────────────────────────────────────────
+
+[Unit]
+Description=HomeSafe Face Recognition Backend
+After=network.target
+
+[Service]
+Type=simple
+User=pi
+WorkingDirectory=/home/pi/HomeSafe/backend
+ExecStart=/home/pi/HomeSafe/backend/.venv/bin/uvicorn app:app \
+    --host 0.0.0.0 \
+    --port 5001 \
+    --log-level info \
+    --ws-ping-interval 0 \
+    --ws-max-size 8388608
+Restart=on-failure
+RestartSec=5
+StandardOutput=journal
+StandardError=journal
+Environment=PYTHONUNBUFFERED=1
+
+[Install]
+WantedBy=multi-user.target
