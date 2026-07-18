@@ -204,7 +204,7 @@
             <div class="flex items-center gap-1">
                 <a href="{{ route('home') }}" class="nav-link {{ request()->routeIs('home') ? 'active' : '' }}">
                     <i class="fas fa-video text-[11px]"></i>
-                    <span class="hidden sm:inline">Monitoring</span>
+                    <span class="hidden sm:inline">Dashboard</span>
                 </a>
                 <a href="{{ route('cameras') }}" class="nav-link {{ request()->routeIs('cameras') ? 'active' : '' }}">
                     <i class="fas fa-expand text-[11px]"></i>

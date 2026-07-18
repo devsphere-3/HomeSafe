@@ -69,12 +69,51 @@ PIN_LED_MERAH = 22
 PIN_BUZZER    = 23
 
 SERVO_FREQ  = 50
-LOCK_ANGLE  = 0
-OPEN_ANGLE  = 90
-OPEN_TIME   = 5
+
+# ── Servo config — dibaca dari servo_config.json, bisa diupdate live ──────────
+_SERVO_CONFIG_FILE = Path("servo_config.json")
+
+def _load_servo_config() -> dict:
+    """
+    Baca servo_config.json jika ada.
+    Fallback ke nilai default jika file tidak ada atau rusak.
+    """
+    defaults = {
+        "pin":        PIN_SERVO,
+        "freq":       SERVO_FREQ,
+        "min_dc":     2.5,
+        "max_dc":     12.5,
+        "lock_angle": 0,
+        "open_angle": 90,
+        "open_time":  5,
+    }
+    if _SERVO_CONFIG_FILE.exists():
+        try:
+            with open(_SERVO_CONFIG_FILE) as f:
+                data = json.load(f)
+            defaults.update({k: data[k] for k in defaults if k in data})
+            logging.getLogger(__name__).info(
+                f"✅ servo_config.json dimuat — "
+                f"lock={defaults['lock_angle']}° open={defaults['open_angle']}° "
+                f"dc={defaults['min_dc']}–{defaults['max_dc']}%"
+            )
+        except Exception as e:
+            logging.getLogger(__name__).warning(f"⚠️  servo_config.json error: {e} — pakai default")
+    return defaults
+
+# Mutable servo config — diupdate oleh endpoint /api/servo/config tanpa restart
+_servo_cfg = _load_servo_config()
+
+# Aksesor yang selalu baca dari _servo_cfg (bukan konstanta)
+# Gunakan sebagai fungsi: LOCK_ANGLE() bukan LOCK_ANGLE
+def LOCK_ANGLE()  -> float: return float(_servo_cfg["lock_angle"])
+def OPEN_ANGLE()  -> float: return float(_servo_cfg["open_angle"])
+def OPEN_TIME()   -> float: return float(_servo_cfg["open_time"])
 
 def _angle_to_duty(angle: float) -> float:
-    return 2.5 + (angle / 18.0)
+    """Konversi sudut ke duty cycle menggunakan min/max DC dari config."""
+    angle = max(0.0, min(180.0, float(angle)))
+    return _servo_cfg["min_dc"] + (angle / 180.0) * (_servo_cfg["max_dc"] - _servo_cfg["min_dc"])
 
 _servo_pwm  = None
 _servo_lock = threading.Lock()
@@ -103,14 +142,14 @@ def setup_gpio() -> None:
         GPIO.setup(PIN_LED_MERAH, GPIO.OUT, initial=GPIO.HIGH)
         GPIO.setup(PIN_BUZZER,    GPIO.OUT, initial=GPIO.LOW)
         GPIO.setup(PIN_SERVO,     GPIO.OUT)
-        lock_dc = _angle_to_duty(LOCK_ANGLE)
+        lock_dc = _angle_to_duty(LOCK_ANGLE())
         pwm = GPIO.PWM(PIN_SERVO, SERVO_FREQ)
         pwm.start(lock_dc)
         with _servo_lock:
             _servo_pwm = pwm
         logger.info(
             f"✅ GPIO diinisialisasi — Servo=PIN{PIN_SERVO} "
-            f"({SERVO_FREQ}Hz, {LOCK_ANGLE}° dc={lock_dc:.2f} TERKUNCI), "
+            f"({SERVO_FREQ}Hz, {LOCK_ANGLE()}° dc={lock_dc:.2f} TERKUNCI), "
             f"LED_H=PIN{PIN_LED_HIJAU}, LED_M=PIN{PIN_LED_MERAH}, Buzzer=PIN{PIN_BUZZER}"
         )
     except Exception as e:
@@ -142,19 +181,19 @@ def _servo_unlock_sequence(name: str) -> None:
         GPIO.output(PIN_LED_HIJAU, GPIO.HIGH)
         GPIO.output(PIN_LED_MERAH, GPIO.LOW)
         _beep(0.15); time.sleep(0.10); _beep(0.15)
-        logger.info(f"🔓 [SERVO] Servo → {OPEN_ANGLE}°")
-        _set_servo_angle(OPEN_ANGLE)
-        logger.info(f"⏳ [SERVO] Menunggu {OPEN_TIME}s…")
-        time.sleep(OPEN_TIME)
-        logger.info(f"🔒 [SERVO] Servo → {LOCK_ANGLE}°")
-        _set_servo_angle(LOCK_ANGLE)
+        logger.info(f"🔓 [SERVO] Servo → {OPEN_ANGLE()}°")
+        _set_servo_angle(OPEN_ANGLE())
+        logger.info(f"⏳ [SERVO] Menunggu {OPEN_TIME()}s…")
+        time.sleep(OPEN_TIME())
+        logger.info(f"🔒 [SERVO] Servo → {LOCK_ANGLE()}°")
+        _set_servo_angle(LOCK_ANGLE())
         GPIO.output(PIN_LED_MERAH, GPIO.HIGH)
         GPIO.output(PIN_LED_HIJAU, GPIO.LOW)
         logger.info(f"✅ [SERVO] Selesai untuk: {name}")
     except Exception as e:
         logger.error(f"❌ [SERVO] Error: {e}")
         try:
-            _set_servo_angle(LOCK_ANGLE)
+            _set_servo_angle(LOCK_ANGLE())
             GPIO.output(PIN_LED_MERAH, GPIO.HIGH)
             GPIO.output(PIN_LED_HIJAU, GPIO.LOW)
             GPIO.output(PIN_BUZZER,    GPIO.LOW)
@@ -401,7 +440,7 @@ async def lifespan(app_instance: FastAPI):
     def _hardware_cleanup():
         logger.info("🧹 Hardware cleanup (atexit)…")
         try:
-            _set_servo_angle(LOCK_ANGLE)
+            _set_servo_angle(LOCK_ANGLE())
             with _servo_lock:
                 if _servo_pwm is not None:
                     _servo_pwm.stop()
@@ -530,6 +569,11 @@ async def _recognition_worker(
             await asyncio.sleep(0.02)
             continue
 
+        # ── Latency measurement: start immediately before recognition ─────────
+        # Captures the full pipeline: detection → embedding → cosine match.
+        # Stopped just before the GPIO signal is sent (grant or denial).
+        recognition_start = time.perf_counter()
+
         t0 = time.perf_counter()
 
         face_info, bbox, face_count, quality = await loop.run_in_executor(
@@ -571,6 +615,12 @@ async def _recognition_worker(
         # Unlock hanya jika consecutive hits sudah cukup DAN tidak dalam cooldown
         do_unlock = matched and not in_cooldown and consecutive.get(match_name, 0) >= REQUIRED
 
+        # ── Latency measurement: stop before GPIO signal ───────────────────────
+        # For a grant: measured just before trigger_unlock_servo().
+        # For a denial (no match): measured here, before result is queued.
+        # Both paths complete the full recognition pipeline at this point.
+        latency = time.perf_counter() - recognition_start
+
         result = {
             "type":            "result",
             "face_detected":   face_detected,
@@ -582,6 +632,7 @@ async def _recognition_worker(
             "similarity":      float(similarity),
             "percentage":      float(match_percentage),
             "process_time_ms": round(elapsed_ms, 2),
+            "latency_ms":      round(latency * 1000, 2),
             "unlocked":        do_unlock,
         }
         try:
@@ -593,6 +644,14 @@ async def _recognition_worker(
             last_unlock_at[match_name] = now
             consecutive.clear()          # reset setelah trigger
             unlock_event.set()
+
+            # ── Latency: stop point for GRANT — right before servo signal ─────
+            # latency already captured above; log it here with full context.
+            logger.info(
+                f"⏱️  Recognition latency (GRANT): {latency * 1000:.2f} ms "
+                f"| name='{match_name}' similarity={similarity:.4f} ({match_percentage:.1f}%)"
+            )
+
             trigger_unlock_servo(match_name)
 
             entry = await loop.run_in_executor(
@@ -604,6 +663,7 @@ async def _recognition_worker(
                 "percentage": float(match_percentage),
                 "timestamp":  entry["timestamp"],
                 "image":      entry["image"],
+                "latency_ms": round(latency * 1000, 2),
             }
             try:
                 result_queue.put_nowait(final_msg)
@@ -615,6 +675,13 @@ async def _recognition_worker(
                     pass
 
             logger.info(f"🔓 Access granted: {match_name} ({match_percentage:.1f}%)")
+
+        elif face_detected and not matched:
+            # ── Latency: stop point for DENIAL — face seen but not recognised ─
+            logger.info(
+                f"⏱️  Recognition latency (DENY):  {latency * 1000:.2f} ms "
+                f"| name='{match_name}' similarity={similarity:.4f}"
+            )
 
         # Beri napas event loop tanpa skip frame:
         # Jika proses lambat (>80 ms) yield sedikit lebih lama agar tasks lain jalan.
@@ -773,8 +840,267 @@ async def clear_history():
     return {"status": "success", "message": "History cleared"}
 
 # ─────────────────────────────────────────────────────────────────────────────
-# WEBSOCKET — Face Recognition  (/ws)
+# SERVO LEGACY CONTROL  — aktif saat server sudah running
+#
+#  Endpoint ini bisa dipanggil dari terminal, curl, atau browser
+#  tanpa perlu mematikan server utama:
+#
+#  curl -X POST http://localhost:5001/api/servo/open
+#  curl -X POST http://localhost:5001/api/servo/lock
+#  curl -X POST http://localhost:5001/api/servo/move/90
+#  curl      http://localhost:5001/api/servo/status
 # ─────────────────────────────────────────────────────────────────────────────
+
+@app.get("/api/servo/status")
+async def servo_status():
+    """Kembalikan konfigurasi servo dan state saat ini."""
+    with _servo_lock:
+        pwm_active = _servo_pwm is not None
+    return {
+        "gpio_available": GPIO_AVAILABLE,
+        "pwm_active":     pwm_active,
+        "pin":            PIN_SERVO,
+        "freq_hz":        SERVO_FREQ,
+        "lock_angle":     LOCK_ANGLE(),
+        "open_angle":     OPEN_ANGLE(),
+        "open_time_s":    OPEN_TIME(),
+        "min_dc":         _servo_cfg["min_dc"],
+        "max_dc":         _servo_cfg["max_dc"],
+        "formula":        "duty = min_dc + (angle / 180) * (max_dc - min_dc)",
+        "duty_lock":      round(_angle_to_duty(LOCK_ANGLE()), 4),
+        "duty_open":      round(_angle_to_duty(OPEN_ANGLE()), 4),
+        "config_file":    str(_SERVO_CONFIG_FILE),
+    }
+
+
+@app.post("/api/servo/open")
+async def servo_open():
+    """Buka servo ke posisi OPEN_ANGLE, tahan OPEN_TIME detik, lalu kunci kembali."""
+    loop = asyncio.get_event_loop()
+    await loop.run_in_executor(_thread_pool, _servo_unlock_sequence, "manual-open")
+    return {
+        "status":  "triggered",
+        "action":  "open",
+        "angle":   OPEN_ANGLE(),
+        "hold_s":  OPEN_TIME(),
+        "message": f"Servo → {OPEN_ANGLE()}°, akan kembali ke {LOCK_ANGLE()}° setelah {OPEN_TIME()}s",
+    }
+
+
+@app.post("/api/servo/lock")
+async def servo_lock():
+    """Paksa servo ke posisi LOCK_ANGLE sekarang juga."""
+    loop = asyncio.get_event_loop()
+
+    def _force_lock():
+        _set_servo_angle(LOCK_ANGLE())
+        try:
+            GPIO.output(PIN_LED_MERAH, GPIO.HIGH)
+            GPIO.output(PIN_LED_HIJAU, GPIO.LOW)
+        except Exception:
+            pass
+        logger.info(f"🔒 [API] Servo force-lock → {LOCK_ANGLE()}°")
+
+    await loop.run_in_executor(_thread_pool, _force_lock)
+    return {
+        "status":  "ok",
+        "action":  "lock",
+        "angle":   LOCK_ANGLE(),
+        "message": f"Servo dikunci ke {LOCK_ANGLE()}°",
+    }
+
+
+@app.post("/api/servo/move/{angle}")
+async def servo_move(angle: float):
+    """
+    Gerakkan servo ke sudut bebas (0–180°).
+    Berguna untuk kalibrasi saat server sedang berjalan.
+
+    Contoh:
+        curl -X POST http://pi:5001/api/servo/move/45
+        curl -X POST http://pi:5001/api/servo/move/90
+    """
+    if not (0 <= angle <= 180):
+        raise HTTPException(status_code=400, detail="Sudut harus antara 0 dan 180")
+
+    loop = asyncio.get_event_loop()
+    dc   = _angle_to_duty(angle)
+
+    def _move():
+        with _servo_lock:
+            if _servo_pwm is not None:
+                _servo_pwm.ChangeDutyCycle(dc)
+        time.sleep(0.5)
+        with _servo_lock:
+            if _servo_pwm is not None:
+                _servo_pwm.ChangeDutyCycle(0)
+        logger.info(f"🔧 [API] Servo → {angle}° (dc={dc:.4f}%)")
+
+    await loop.run_in_executor(_thread_pool, _move)
+    return {
+        "status":     "ok",
+        "angle":      angle,
+        "duty_cycle": round(dc, 4),
+        "message":    f"Servo digerakkan ke {angle}° (duty={dc:.4f}%)",
+    }
+
+
+@app.post("/api/servo/cycle")
+async def servo_cycle():
+    """
+    Jalankan siklus LOCK → OPEN → LOCK satu kali untuk test.
+    Tidak mengaktifkan LED/buzzer — murni test mekanis.
+    """
+    loop = asyncio.get_event_loop()
+
+    def _cycle():
+        logger.info("🔧 [API] Servo test cycle dimulai")
+        _set_servo_angle(LOCK_ANGLE());  time.sleep(0.3)
+        _set_servo_angle(OPEN_ANGLE());  time.sleep(2.0)
+        _set_servo_angle(LOCK_ANGLE())
+        logger.info("🔧 [API] Servo test cycle selesai")
+
+    await loop.run_in_executor(_thread_pool, _cycle)
+    return {
+        "status":  "ok",
+        "action":  "cycle",
+        "message": f"Siklus {LOCK_ANGLE()}° → {OPEN_ANGLE()}° → {LOCK_ANGLE()}° selesai",
+    }
+
+
+@app.post("/api/servo/buzzer/{state}")
+async def servo_buzzer(state: str):
+    """
+    Aktifkan atau matikan buzzer manual.
+    state: 'on' atau 'off'
+
+    Contoh:
+        curl -X POST http://pi:5001/api/servo/buzzer/on
+        curl -X POST http://pi:5001/api/servo/buzzer/off
+    """
+    if state not in ("on", "off"):
+        raise HTTPException(status_code=400, detail="State harus 'on' atau 'off'")
+    loop = asyncio.get_event_loop()
+    gpio_state = GPIO.HIGH if state == "on" else GPIO.LOW
+
+    def _buzz():
+        try:
+            GPIO.output(PIN_BUZZER, gpio_state)
+            logger.info(f"🔔 [API] Buzzer → {state}")
+        except Exception as e:
+            logger.warning(f"Buzzer error: {e}")
+
+    await loop.run_in_executor(_thread_pool, _buzz)
+    return {"status": "ok", "buzzer": state}
+
+
+@app.post("/api/servo/led/{color}/{state}")
+async def servo_led(color: str, state: str):
+    """
+    Kontrol LED manual.
+    color: 'green' atau 'red'
+    state: 'on'   atau 'off'
+
+    Contoh:
+        curl -X POST http://pi:5001/api/servo/led/green/on
+        curl -X POST http://pi:5001/api/servo/led/red/off
+    """
+    if color not in ("green", "red"):
+        raise HTTPException(status_code=400, detail="Color harus 'green' atau 'red'")
+    if state not in ("on", "off"):
+        raise HTTPException(status_code=400, detail="State harus 'on' atau 'off'")
+
+    pin        = PIN_LED_HIJAU if color == "green" else PIN_LED_MERAH
+    gpio_state = GPIO.HIGH if state == "on" else GPIO.LOW
+    loop       = asyncio.get_event_loop()
+
+    def _led():
+        try:
+            GPIO.output(pin, gpio_state)
+            logger.info(f"💡 [API] LED {color} GPIO{pin} → {state}")
+        except Exception as e:
+            logger.warning(f"LED error: {e}")
+
+    await loop.run_in_executor(_thread_pool, _led)
+    return {"status": "ok", "led": color, "state": state, "pin": pin}
+
+
+@app.post("/api/servo/config")
+async def update_servo_config(body: dict):
+    """
+    Update konfigurasi servo secara live — tanpa restart server.
+    Dipanggil otomatis oleh servo_calibration.py saat menyimpan config.
+
+    Payload (semua opsional):
+        {
+            "lock_angle": 0,
+            "open_angle": 90,
+            "open_time":  5,
+            "min_dc":     2.5,
+            "max_dc":     12.5
+        }
+
+    Contoh dari terminal:
+        curl -X POST http://pi:5001/api/servo/config \\
+             -H "Content-Type: application/json" \\
+             -d '{"lock_angle": 5, "open_angle": 85}'
+    """
+    allowed  = {"lock_angle", "open_angle", "open_time", "min_dc", "max_dc"}
+    updated  = {}
+
+    for key in allowed:
+        if key in body:
+            try:
+                val = float(body[key])
+            except (TypeError, ValueError):
+                raise HTTPException(status_code=400, detail=f"Nilai '{key}' harus angka")
+
+            # Validasi range
+            if key == "lock_angle" and not (0 <= val <= 180):
+                raise HTTPException(status_code=400, detail="lock_angle harus 0–180")
+            if key == "open_angle" and not (0 <= val <= 180):
+                raise HTTPException(status_code=400, detail="open_angle harus 0–180")
+            if key == "open_time" and not (1 <= val <= 60):
+                raise HTTPException(status_code=400, detail="open_time harus 1–60 detik")
+            if key == "min_dc" and not (0 <= val <= 5):
+                raise HTTPException(status_code=400, detail="min_dc harus 0–5")
+            if key == "max_dc" and not (5 <= val <= 20):
+                raise HTTPException(status_code=400, detail="max_dc harus 5–20")
+
+            _servo_cfg[key] = val
+            updated[key]    = val
+
+    if not updated:
+        raise HTTPException(status_code=400, detail="Tidak ada field valid yang diterima")
+
+    # Simpan ke file agar persisten setelah restart
+    try:
+        with open(_SERVO_CONFIG_FILE, "w") as f:
+            json.dump(_servo_cfg, f, indent=2)
+        logger.info(f"💾 servo_config.json diupdate: {updated}")
+    except Exception as e:
+        logger.warning(f"Gagal simpan servo_config.json: {e}")
+
+    # Gerakkan servo ke posisi LOCK terbaru agar langsung terasa
+    if "lock_angle" in updated or "min_dc" in updated or "max_dc" in updated:
+        loop = asyncio.get_event_loop()
+        await loop.run_in_executor(_thread_pool, _set_servo_angle, LOCK_ANGLE())
+        logger.info(f"🔧 Servo langsung diposisikan ke LOCK={LOCK_ANGLE()}° setelah update config")
+
+    return {
+        "status":  "ok",
+        "updated": updated,
+        "current": {
+            "lock_angle": LOCK_ANGLE(),
+            "open_angle": OPEN_ANGLE(),
+            "open_time":  OPEN_TIME(),
+            "min_dc":     _servo_cfg["min_dc"],
+            "max_dc":     _servo_cfg["max_dc"],
+            "duty_lock":  round(_angle_to_duty(LOCK_ANGLE()), 4),
+            "duty_open":  round(_angle_to_duty(OPEN_ANGLE()), 4),
+        },
+    }
+
 
 @app.websocket("/ws")
 async def websocket_recognition(websocket: WebSocket):
